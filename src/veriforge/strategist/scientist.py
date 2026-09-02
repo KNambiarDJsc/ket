@@ -24,10 +24,13 @@ Score axes and what backs each one (spec §12's formula):
   information_gain          — does the requirement have a structured
                                invariant (Phase 3) an Oracle could actually
                                check mechanically, vs. only free text?
-  change_relevance           — NOT YET COMPUTED. This needs git diff/blame
-                               integration (no phase has built that yet), so
-                               it's a constant placeholder rather than a
-                               guess dressed up as a signal.
+  change_relevance           — Phase 13: real when a git diff is available
+                               (`regression/change_impact.py`) — did the
+                               Unknown's matched endpoint's source file
+                               actually change since the last run? Falls
+                               back to the original constant placeholder
+                               when no diff is available (first run, no git
+                               repo) rather than guessing.
   cost                       — requirement kind again: authorization checks
                                need multiple actor identities to test
                                properly, so they cost more than a bare GET.
@@ -45,7 +48,8 @@ import re
 from dataclasses import dataclass
 
 from veriforge.domain.enums import RequirementKind, TestStatus
-from veriforge.domain.models import Experiment, Requirement, Test, Unknown, WorldModel
+from veriforge.domain.models import ApiEndpoint, Experiment, Requirement, Test, Unknown, WorldModel
+from veriforge.world_model.builder import match_endpoint_for_requirement
 
 DEFAULT_WEIGHTS: dict[str, float] = {
     "coverage": 1.0,
@@ -83,7 +87,9 @@ _COST_BY_KIND: dict[RequirementKind, float] = {
 _NO_ROLE_CHECK_HINT = "no role/permission-check identifier"
 _ENDPOINT_KEY_RE = re.compile(r"Matched to (?P<method>[A-Z]+) (?P<path>\S+)")
 
-_UNCOMPUTED_CHANGE_RELEVANCE = 0.5  # constant until a git-history phase exists
+_UNCOMPUTED_CHANGE_RELEVANCE = 0.5  # fallback when no git diff is available at all
+_CHANGED_RELEVANCE = 1.0  # the matched endpoint's file is actually in the diff
+_UNCHANGED_RELEVANCE = 0.2  # a diff IS available and this file is confirmed NOT in it
 
 
 @dataclass
@@ -129,6 +135,9 @@ def score_unknown(
     unknown: Unknown,
     requirement: Requirement | None,
     seen_endpoint_keys: set[str],
+    *,
+    endpoint: ApiEndpoint | None = None,
+    changed_files: set[str] | None = None,
 ) -> ScoreBreakdown:
     kind = requirement.kind if requirement else RequirementKind.UNSPECIFIED
     critical = requirement.critical if requirement else False
@@ -140,6 +149,13 @@ def score_unknown(
     information_gain = 1.0 if (requirement and requirement.structured) else 0.4
     cost = _COST_BY_KIND.get(kind, 0.4)
 
+    if changed_files is None:
+        change_relevance = _UNCOMPUTED_CHANGE_RELEVANCE
+    elif endpoint is not None and endpoint.source_file in changed_files:
+        change_relevance = _CHANGED_RELEVANCE
+    else:
+        change_relevance = _UNCHANGED_RELEVANCE
+
     key = endpoint_key(unknown.rationale)
     redundancy = 0.5 if key is not None and key in seen_endpoint_keys else 0.0
 
@@ -149,7 +165,7 @@ def score_unknown(
         risk=risk,
         historical_bug_likelihood=historical_bug_likelihood,
         information_gain=information_gain,
-        change_relevance=_UNCOMPUTED_CHANGE_RELEVANCE,
+        change_relevance=change_relevance,
         cost=cost,
         redundancy=redundancy,
     )
@@ -158,9 +174,15 @@ def score_unknown(
 def rank_experiments(
     world_model: WorldModel,
     weights: dict[str, float] | None = None,
+    *,
+    changed_files: set[str] | None = None,
 ) -> list[Experiment]:
     """Scores every open (unresolved) Unknown as a candidate Experiment and
-    returns them ranked highest-value first."""
+    returns them ranked highest-value first. `changed_files` (Phase 13,
+    from regression/change_impact.changed_files_since) lets change_relevance
+    be a real signal instead of a constant placeholder; omit it (None) when
+    no git diff is available -- "can't tell" must never be silently treated
+    as "changed" or "unchanged"."""
     weights = weights or DEFAULT_WEIGHTS
     requirements_by_id = {r.id: r for r in world_model.requirements}
     seen_endpoint_keys: set[str] = set()
@@ -170,7 +192,8 @@ def rank_experiments(
         if unknown.resolved:
             continue
         requirement = requirements_by_id.get(unknown.requirement_id) if unknown.requirement_id else None
-        breakdown = score_unknown(unknown, requirement, seen_endpoint_keys)
+        endpoint = match_endpoint_for_requirement(requirement, world_model.api_endpoints) if requirement else None
+        breakdown = score_unknown(unknown, requirement, seen_endpoint_keys, endpoint=endpoint, changed_files=changed_files)
 
         key = endpoint_key(unknown.rationale)
         if key is not None:

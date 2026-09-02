@@ -55,7 +55,7 @@ explicitly deferred.
 | 10 | **API/Integration/System testing breadth**: multi-endpoint contract checks, request/response schema assertions, service-to-service workflows (not just one endpoint in isolation). Covers Core: API, integration, system testing | ✅ (endpoint-exposure + creation-visibility contracts; true service-to-service workflows deferred — see notes) |
 | 11 | **Database Observation**: a real DB-backed example app + DB state-comparison oracle (Level 3 today only checks via a follow-up GET; needs a real adapter for SQL/NoSQL state checks). Covers Core: data integrity | ✅ (SQLite adapter + one executable data-integrity check; NoSQL and broader state comparisons deferred — see notes) |
 | 12 | **Skill System**: `skills/*/SKILL.md` as versioned, evaluable procedural knowledge; a retriever the Context Compiler calls, not a blob injected into every context | ✅ (retriever + Context Compiler integration + 3 real skills documenting Phases 6/10/11's own testing approaches; evaluation itself deferred to Phase 16) |
-| 13 | **Test Healer** (selector/timing/locator fixes only, never weakens an assertion — every heal produces a diff) **+ Regression Engine, including regression-test generation**: a `BUG_VERIFIED` Finding gets a permanent, executable regression test file written to the project's own test suite (not just a `Test` row) — application source is never touched; re-run only the requirements/tests the World Model says a diff actually affects | not started |
+| 13 | **Test Healer** (selector/timing/locator fixes only, never weakens an assertion — every heal produces a diff) **+ Regression Engine, including regression-test generation**: a `BUG_VERIFIED` Finding gets a permanent, executable regression test file written to the project's own test suite (not just a `Test` row) — application source is never touched; re-run only the requirements/tests the World Model says a diff actually affects | ✅ (opt-in via `--write-regressions`; also closes Phase 5's change_relevance placeholder and Phase 8's stale-memory gap with a real git-diff signal — see notes) |
 | 14 | **Environment Engineering**: Docker-based isolated environments, seed data/users, fault injection (latency, timeout, service failure, duplicate event, stale state). Unlocks Advanced: concurrency, failure/recovery, chaos | not started |
 | 15 | **Security + Concurrency** hypothesis engine: cross-account access, privilege escalation, object enumeration, race conditions/duplicate actions — needs Phase 14's multi-identity/fault-injection environment to be real rather than single-case | not started |
 | 16 | **Evaluation Lab + Harness Auditor**: multiple benchmark apps with known, seeded bugs; tracks the metrics in §42 (verified findings/compute, information gain/experiment, false-positive rate); harness/strategy changes must clear this bar before being kept — this is what makes Phase 8's "keep/revert" gate statistically meaningful instead of n=1 | not started |
@@ -738,6 +738,82 @@ before release") — not a synthetic fixture — and `skills-retrieved.json`
 records which ones and at what version. An irrelevant Skill (crafted with
 zero keyword overlap in `test_context_compiler.py`) is correctly excluded,
 not merely ranked last.
+
+## Phase 13 implementation notes
+
+Three previously-deferred gaps close here, all off the same underlying
+signal: a real `git diff`.
+
+- **A real change-impact primitive, not a guess.**
+  `regression/change_impact.py`'s `current_commit`/`changed_files_since`
+  shell out to `git` directly. `None` (never an empty set) means "can't
+  tell" — not a git repo, git missing, or an unreachable commit (e.g. after
+  a rebase) — so a caller can't silently mistake "can't tell" for "nothing
+  changed," which would be exactly wrong the one time this feature matters.
+- **Closes Phase 5's `change_relevance` placeholder.** `strategist/
+  scientist.rank_experiments` now takes `changed_files` and resolves each
+  Unknown's endpoint (reusing `world_model.builder.
+  match_endpoint_for_requirement`) to score it for real: 1.0 if that
+  endpoint's file is actually in the diff, 0.2 if a diff exists but it
+  isn't, and the original constant (0.5) only when no diff is available at
+  all (first run, no git). `JobRunner._changed_files_since_last_run` finds
+  the most recent prior job for this project with a known `Job.repo_commit`
+  (new field, captured every run via `current_commit`) as the diff
+  baseline.
+- **Closes Phase 8's documented stale-memory gap.** Phase 8's own notes
+  said re-verifying a previously-confirmed bug after a fix "is the
+  Regression Engine's job (Phase 13), not Memory's." `memory/semantic.
+  apply_semantic_memory` now takes `current_job`: a prior Finding only
+  keeps resolving its Unknown if the endpoint file behind it hasn't
+  changed since that Finding's own job ran (found via the new `Finding.
+  job_id` field); otherwise the Unknown is left open for re-verification,
+  with its rationale explaining why. Without `current_job` (or without
+  git), this degrades to Phase 8's original unconditional-resolve
+  behavior — nothing about existing callers changed.
+- **Regression Engine: reuses the Executor/Oracle, doesn't re-derive HTTP
+  sequences.** `regression/generator.py`'s generated pytest file imports
+  `execution.experiment_runner.run_experiment` directly and asserts
+  `Verdict.PASS` — the exact same check that found the bug, run again, now
+  expected to succeed. That means the file currently *fails* (the bug is
+  still there) and starts passing the moment the app is fixed. A
+  standalone harness (`regression/runtime.py`, using a fresh in-memory
+  SQLite `Store` and a new `NullLLMProvider`) means the generated file
+  needs nothing from VeriForge's own job lifecycle or this repo's pytest
+  fixtures to run — verified by actually invoking it via a real `pytest`
+  subprocess, not just checking it parses.
+- **Keyed by `requirement.id` (Phase 8's *stable* id), not `finding.id`**
+  (freshly random every run) — one regression file per logical requirement,
+  regenerated/healed in place across runs, never accumulating a new file
+  per run for the same bug. Deliberately excludes anything time-varying
+  (a generation timestamp, the originating Finding id) from the generated
+  source itself, so regenerating from identical inputs is byte-for-byte
+  deterministic — otherwise the Healer could never tell "real drift" apart
+  from "cosmetic re-run noise."
+- **Test Healer, scoped to what this project actually owns.** A generic
+  Playwright-selector healer has no real fixture to validate against (the
+  Explorer doesn't write persistent test files); the regression tests
+  *this phase generates* do, with a known, deterministic structure. `heal_
+  regression_test` diffs old vs. freshly-regenerated source and applies the
+  patch only if the diff never touches the `assert result.oracle_verdict.
+  verdict == Verdict.PASS` line — checked in code, not by convention. A
+  diff is always returned, whether applied or refused, so a refusal is
+  still inspectable by a human, never silent.
+- **Never touches the target's own source, and opt-in by default.** Only
+  new files are ever written (`veriforge_regressions/`, never an existing
+  test), and only when `--write-regressions` is explicitly passed — writing
+  into someone's repository unasked is a bigger deal than everything this
+  project has done up to now (which only ever reads `--repo`), so this
+  follows the same "explicit input, never inferred" rule as `--db-path`.
+
+**Verified live, end to end**: against a scratch copy of the example DB
+app (never the tracked `examples/` fixture — copying first is how every
+test here avoids polluting it), a `veriforge verify --write-regressions`
+run confirms the Phase 11 soft-delete bug and writes `veriforge_regressions/
+test_regression_<requirement_id>.py` into the copy. Running that generated
+file with a real `pytest` subprocess against the same live server produces
+`1 failed` with the reasoning text `"...still physically present..."` in
+its output — proof the generated test is genuinely executable and
+semantically correct, not merely syntactically valid.
 
 ## Local-first model policy
 

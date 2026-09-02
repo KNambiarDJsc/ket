@@ -4,7 +4,7 @@ Autonomous Software Verification & Testing OS. See `docs/PHASES.md` for the
 full architecture-to-phase mapping and the prior art (Ralph loop, Anthropic
 harness-engineering, EnvHarness, Claude Skills) this design draws from.
 
-This repo currently implements **Phase 0-12** (adds Project persistence/reuse
+This repo currently implements **Phase 0-13** (adds Project persistence/reuse
 across runs, episodic/semantic/procedural Memory, evaluation-gated
 Learning, two more executable invariant kinds — data-invariant status
 checks and the positive "only X may do this" authorization case — two
@@ -12,9 +12,10 @@ API/integration-contract invariant kinds (single-endpoint reachability and
 a real multi-endpoint create-then-list contract with request/response
 schema-consistency checking), a data-integrity invariant kind checked
 by reading a real database directly rather than trusting the application's
-own API, and a Skill System that retrieves versioned procedural knowledge
+own API, a Skill System that retrieves versioned procedural knowledge
 (`skills/*/SKILL.md`) relevant to the current goal instead of injecting it
-all into every context; running the same `--repo` twice, the second run
+all into every context, and a Regression Engine + Test Healer driven by a
+real `git diff` signal; running the same `--repo` twice, the second run
 recognizes a bug the first run already confirmed, then executes the
 *next* candidate and confirms a second, independent bug; see
 `docs/PHASES.md` for details): a real, persisted job
@@ -85,8 +86,23 @@ injected regardless of relevance), and every job now writes
 `skills-retrieved.json` as a real, run-indexed trail for a future
 evaluation phase to eventually judge.
 
-Everything past that (a Test Healer/Regression Engine, Environment
-Engineering, evaluation lab...) is future phase work — see
+Phase 13 adds a Regression Engine + Test Healer, both driven by a real
+`git diff` (`regression/change_impact.py`) — closing two gaps earlier
+phases explicitly deferred rather than guessed at: Phase 5's
+`change_relevance` scoring axis (a constant placeholder until now) and
+Phase 8's documented limitation that a previously-confirmed bug never gets
+re-checked even after a fix. Opt in with `--write-regressions`: a
+`BUG_VERIFIED` Finding gets a permanent pytest file written into
+`--repo`'s own `veriforge_regressions/` directory (never touching
+application source), reusing VeriForge's own Executor/Oracle so the file
+asserts the fix rather than re-deriving the HTTP sequence from scratch —
+verified by actually running the generated file via a real `pytest`
+subprocess. Re-running it later, the Test Healer patches the file's
+embedded endpoint/base_url if they've drifted, always producing a diff and
+refusing outright if the patch would touch the assertion itself.
+
+Everything past that (Environment Engineering, Security/Concurrency,
+evaluation lab...) is future phase work — see
 `docs/PHASES.md` for the tracker.
 
 ## Setup
@@ -143,6 +159,12 @@ This confirms the planted soft-delete bug: the DELETE endpoint only flags a
 row `deleted` instead of removing it, so a follow-up API GET alone would
 report it gone — only reading the database table directly (via the new
 `database.query_sqlite` harness tool) reveals it's still there.
+
+Add `--write-regressions` to also write a permanent regression test for
+that confirmed bug into `--repo`'s own `veriforge_regressions/` directory
+(Phase 13). Since that writes into whatever `--repo` points at, try it
+against a copy of `examples/example-db-app` rather than the tracked one if
+you don't want the generated file showing up in `git status`.
 
 ## Tests
 

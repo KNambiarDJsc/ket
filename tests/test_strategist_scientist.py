@@ -1,6 +1,6 @@
 from veriforge.domain.enums import RequirementKind, TestStatus
-from veriforge.domain.models import Requirement, Unknown, WorldModel
-from veriforge.strategist.scientist import endpoint_key, promote_to_tests, rank_experiments
+from veriforge.domain.models import ApiEndpoint, Requirement, Unknown, WorldModel
+from veriforge.strategist.scientist import endpoint_key, promote_to_tests, rank_experiments, score_unknown
 
 
 def make_world_model(requirements, unknowns):
@@ -84,6 +84,57 @@ def test_promote_to_tests_marks_top_k_planned_rest_hypothesis():
     statuses = [t.status for t in tests]
     assert statuses[:2] == [TestStatus.PLANNED, TestStatus.PLANNED]
     assert all(s == TestStatus.HYPOTHESIS for s in statuses[2:])
+
+
+# ---- Phase 13: real change_relevance ----
+
+def test_score_unknown_uses_placeholder_when_no_diff_available():
+    req = Requirement(id="r", project_id="p", source_text="x", critical=True)
+    unknown = Unknown(project_id="p", requirement_id="r", question="q", rationale="r")
+    breakdown = score_unknown(unknown, req, set(), endpoint=None, changed_files=None)
+    assert breakdown.change_relevance == 0.5
+
+
+def test_score_unknown_scores_high_when_endpoint_file_in_diff():
+    req = Requirement(id="r", project_id="p", source_text="x", critical=True)
+    unknown = Unknown(project_id="p", requirement_id="r", question="q", rationale="r")
+    endpoint = ApiEndpoint(project_id="p", method="DELETE", path="/x", source_file="app.py", source_line=1)
+    breakdown = score_unknown(unknown, req, set(), endpoint=endpoint, changed_files={"app.py"})
+    assert breakdown.change_relevance == 1.0
+
+
+def test_score_unknown_scores_low_when_diff_available_but_file_untouched():
+    req = Requirement(id="r", project_id="p", source_text="x", critical=True)
+    unknown = Unknown(project_id="p", requirement_id="r", question="q", rationale="r")
+    endpoint = ApiEndpoint(project_id="p", method="DELETE", path="/x", source_file="app.py", source_line=1)
+    breakdown = score_unknown(unknown, req, set(), endpoint=endpoint, changed_files={"other.py"})
+    assert breakdown.change_relevance == 0.2
+
+
+def test_rank_experiments_boosts_the_unknown_whose_endpoint_actually_changed():
+    endpoint_alpha = ApiEndpoint(project_id="p", method="DELETE", path="/alpha", source_file="alpha.py", source_line=1)
+    endpoint_bravo = ApiEndpoint(project_id="p", method="DELETE", path="/bravo", source_file="bravo.py", source_line=1)
+    req_alpha = Requirement(
+        id="req_alpha", project_id="p", source_text="Members cannot delete alpha.", critical=True,
+        structured={"actor": "members", "action": "delete", "object": "alpha", "expected": "denied"},
+    )
+    req_bravo = Requirement(
+        id="req_bravo", project_id="p", source_text="Members cannot delete bravo.", critical=True,
+        structured={"actor": "members", "action": "delete", "object": "bravo", "expected": "denied"},
+    )
+    unknowns = [
+        Unknown(project_id="p", requirement_id="req_alpha", question="qa", rationale="Matched to DELETE /alpha."),
+        Unknown(project_id="p", requirement_id="req_bravo", question="qb", rationale="Matched to DELETE /bravo."),
+    ]
+    world_model = WorldModel(
+        project_id="p", requirements=[req_alpha, req_bravo], unknowns=unknowns,
+        api_endpoints=[endpoint_alpha, endpoint_bravo],
+    )
+
+    ranked = rank_experiments(world_model, changed_files={"bravo.py"})
+
+    assert ranked[0].requirement_id == "req_bravo"
+    assert ranked[0].score > ranked[1].score
 
 
 def test_exploration_derived_unknown_has_no_requirement_but_still_scores():

@@ -37,6 +37,10 @@ def verify(
     db_path: Optional[str] = typer.Option(
         None, "--db-path", help="Path to a SQLite database file, for direct DB-state verification (Phase 11)"
     ),
+    write_regressions: bool = typer.Option(
+        False, "--write-regressions",
+        help="Write a permanent regression test into --repo for every BUG_VERIFIED finding (Phase 13). Off by default.",
+    ),
     model: str = typer.Option(
         DEFAULT_MODEL, "--model", help="Local Ollama model to use (must be `ollama pull`ed already)"
     ),
@@ -82,7 +86,7 @@ def verify(
     )
 
     artifacts_dir = Path(workdir) / ".veriforge" / "artifacts"
-    runner = JobRunner(store, bus, llm, artifacts_dir)
+    runner = JobRunner(store, bus, llm, artifacts_dir, write_regressions=write_regressions)
 
     console.print(f"[bold]Starting job {job.id}[/bold] (project {project.id})")
     try:
@@ -112,6 +116,8 @@ def verify(
     if summary.reproduced is not None:
         table.add_row("Reproduced", "yes" if summary.reproduced else "no (possibly flaky)")
     table.add_row("Findings", str(summary.finding_count))
+    if summary.regression_test_path:
+        table.add_row("Regression test written", summary.regression_test_path)
     table.add_row("Strategy version", str(summary.strategy_version))
     if summary.unknowns_resolved_from_memory:
         table.add_row("Resolved from memory", str(summary.unknowns_resolved_from_memory))

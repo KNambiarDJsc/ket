@@ -192,6 +192,8 @@ class Finding(BaseModel):
     root_cause: str | None = None  # Phase 7 Investigator: static+dynamic evidence tied together
     reproduced: bool | None = None  # Phase 7 Reproducer: None = not attempted
     requirement_id: str | None = None  # Phase 8 semantic memory: lets a later run recognize "already confirmed"
+    job_id: str | None = None  # Phase 13: which run produced this -- lets change-impact analysis find that run's repo_commit
+    regression_test_path: str | None = None  # Phase 13: set when the Regression Engine wrote a permanent test for this
 
 
 class Artifact(BaseModel):
@@ -259,6 +261,7 @@ class Job(BaseModel):
     base_url: str | None = None
     requirements_path: str | None = None
     db_path: str | None = None  # Phase 11: SQLite file for direct DB-state verification
+    repo_commit: str | None = None  # Phase 13: git HEAD of repo_path at job start, for change-impact analysis
     model_name: str = "llama3.2:3b"
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)

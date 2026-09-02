@@ -27,3 +27,21 @@ class LLMProvider(ABC):
     @property
     @abstractmethod
     def model_name(self) -> str: ...
+
+
+class NullLLMProvider(LLMProvider):
+    """Always-unavailable provider for harness paths that need an
+    LLMProvider instance to satisfy `register_builtin_tools()` but never
+    actually call `llm.generate` -- e.g. a Phase 13 generated regression
+    test's standalone harness (`regression/runtime.py`), which only ever
+    calls api./database. tools."""
+
+    def generate(self, prompt: str, *, system: str | None = None) -> str:
+        raise LLMUnavailableError("NullLLMProvider never generates")
+
+    def is_available(self) -> bool:
+        return False
+
+    @property
+    def model_name(self) -> str:
+        return "null"

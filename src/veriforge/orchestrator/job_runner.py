@@ -38,9 +38,12 @@ from veriforge.investigation.reproducer import reproduce
 from veriforge.investigation.triager import triage
 from veriforge.learning.engine import compute_run_metric, record_run_learning
 from veriforge.llm.provider import LLMProvider, LLMUnavailableError
+from veriforge.memory.episodic import get_run_history
 from veriforge.memory.procedural import get_active_strategy
 from veriforge.memory.semantic import apply_semantic_memory
 from veriforge.orchestrator.state_machine import JobStateMachine
+from veriforge.regression.change_impact import changed_files_since, current_commit
+from veriforge.regression.engine import write_or_heal_regression_test
 from veriforge.requirements.parser import parse_requirements_file
 from veriforge.skills.loader import discover_skills
 from veriforge.skills.retriever import SkillRetriever
@@ -79,6 +82,7 @@ class RunSummary:
     artifact_paths: list[str]
     event_count: int
     tool_calls_used: int
+    regression_test_path: str | None
     next_phase: str
 
 
@@ -94,6 +98,7 @@ class JobRunner:
         max_tool_calls: int = 50,
         max_runtime_seconds: float = 900.0,
         skills_dir: str | Path | None = _DEFAULT_SKILLS_DIR,
+        write_regressions: bool = False,
     ):
         self._store = store
         self._bus = bus
@@ -106,6 +111,11 @@ class JobRunner:
         self._registry = ToolRegistry()
         register_builtin_tools(self._registry, llm)
         self._skill_retriever = SkillRetriever(discover_skills(skills_dir) if skills_dir else [])
+        # Phase 13: writing files into the *target* repo (--repo) is a bigger
+        # deal than everything else this system does by default (which only
+        # ever reads it) -- opt-in, same reasoning as --db-path/--url never
+        # being inferred.
+        self._write_regressions = write_regressions
 
     def _write_artifact(self, job: Job, kind: str, data: dict) -> Artifact:
         job_dir = self._artifacts_root / job.id
@@ -168,6 +178,12 @@ class JobRunner:
         checks: dict[str, object] = {}
         if job.repo_path:
             checks["repo_exists"] = Path(job.repo_path).exists()
+            # Phase 13: the commit --repo was at when this job ran, so a
+            # later run can tell whether the code behind a Finding has
+            # actually changed since (regression/change_impact.py). None
+            # (not a fabricated hash) when --repo isn't a git repo at all.
+            job.repo_commit = current_commit(job.repo_path)
+            checks["repo_commit"] = job.repo_commit
         if job.base_url:
             try:
                 resp = self._executor.call("api.get", url=job.base_url)
@@ -233,7 +249,7 @@ class JobRunner:
         # produced a Finding for one of these requirements, mark its Unknown
         # resolved now rather than re-flagging an already-confirmed bug as
         # fresh every single run.
-        resolved_from_memory = apply_semantic_memory(self._store, world_model)
+        resolved_from_memory = apply_semantic_memory(self._store, world_model, current_job=job)
         self._resolved_from_memory = resolved_from_memory
         if resolved_from_memory:
             self._bus.publish(job.id, EventType.WORLD_MODEL_UPDATED, {"resolved_from_memory": resolved_from_memory})
@@ -291,7 +307,11 @@ class JobRunner:
         # DEFAULT_WEIGHTS -- a real hook for a future evaluated weight change
         # (Phase 17) to actually take effect on the next run.
         strategy = get_active_strategy(self._store, job.project_id)
-        experiments = rank_experiments(world_model, weights=strategy.weights) if world_model else []
+        changed_files = self._changed_files_since_last_run(job)
+        experiments = (
+            rank_experiments(world_model, weights=strategy.weights, changed_files=changed_files)
+            if world_model else []
+        )
         tests = promote_to_tests(experiments, top_k=3)
 
         for experiment in experiments:
@@ -325,6 +345,24 @@ class JobRunner:
             job, JobState.TESTING_PENDING,
             reason=f"generated {len(experiments)} candidate experiments, executed {execution['executed_count']}",
         )
+
+    def _changed_files_since_last_run(self, job: Job) -> set[str] | None:
+        """Phase 13: a real `change_relevance` signal for the Test Scientist
+        (strategist/scientist.rank_experiments) needs a diff baseline. The
+        most recent prior job for this project with a known commit is the
+        natural one -- None (not an empty set) whenever there's nothing to
+        diff against (no repo, not git, or this is the first run), since
+        "can't tell" must never be silently read as "nothing changed"."""
+        if not job.repo_path or not job.repo_commit:
+            return None
+        history = get_run_history(self._store, job.project_id)
+        prior_jobs = [j for j in history if j.id != job.id and j.repo_commit]
+        if not prior_jobs:
+            return None
+        previous_commit = prior_jobs[-1].repo_commit
+        if previous_commit == job.repo_commit:
+            return set()  # known baseline, known current -- genuinely nothing changed
+        return changed_files_since(job.repo_path, previous_commit)
 
     def _execute_top_experiment(self, job: Job, world_model, experiments: list, tests: list) -> dict:
         """Runs exactly the single highest-ranked *executable* experiment —
@@ -385,6 +423,7 @@ class JobRunner:
             finding_dict = None
             investigation_dict = None
             if result.finding is not None:
+                result.finding.job_id = job.id
                 investigation_dict = self._investigate_finding(job, requirement, endpoint, world_model, test, result)
                 evidences = [
                     self._store.evidence.save(
@@ -416,12 +455,16 @@ class JobRunner:
             self._write_artifact(job, "finding.json", {"finding": finding_dict})
             if investigation_dict is not None:
                 self._write_artifact(job, "investigation.json", investigation_dict)
+            regression_info = investigation_dict.get("regression") if investigation_dict else None
+            if regression_info is not None:
+                self._write_artifact(job, "regression-test.json", regression_info)
 
             return {
                 "executed_count": 1,
                 "finding": result.finding,
                 "verdict": result.oracle_verdict.verdict.value,
                 "reproduced": investigation_dict["reproducible"] if investigation_dict else None,
+                "regression_test_path": regression_info["path"] if regression_info else None,
                 "note": f"executed '{experiment.hypothesis}' -> {result.oracle_verdict.verdict.value}",
             }
 
@@ -470,13 +513,41 @@ class JobRunner:
         test.status = TestStatus.BUG_VERIFIED if reproduction.reproducible else TestStatus.TRIAGED
         self._store.tests.save(test, job_id=job.id, project_id=job.project_id)
 
+        regression = None
+        if reproduction.reproducible and self._write_regressions and job.repo_path:
+            regression = self._write_regression_test(job, requirement, endpoint, world_model)
+            if regression is not None:
+                result.finding.regression_test_path = str(regression.path)
+
         return {
             "category": category.value,
             "triage_reasoning": triage_reasoning,
             "root_cause": root_cause,
             "reproducible": reproduction.reproducible,
             "second_run_verdict": reproduction.second_run.oracle_verdict.verdict.value,
+            "regression": (
+                {"path": str(regression.path), "action": regression.action, "diff": regression.diff}
+                if regression is not None else None
+            ),
         }
+
+    def _write_regression_test(self, job: Job, requirement, endpoint, world_model):
+        """Phase 13 Regression Engine + Test Healer: write a permanent
+        regression test for a BUG_VERIFIED Finding, or heal an existing one
+        in place if the endpoint/base_url has drifted since it was last
+        generated. A requirement whose invariant shape the generator can't
+        render (temporal/ordering -- never yet executable, so never reaches
+        here) is skipped, not guessed at."""
+        try:
+            return write_or_heal_regression_test(
+                repo_path=job.repo_path,
+                requirement=requirement,
+                action_endpoint=endpoint,
+                all_endpoints=world_model.api_endpoints,
+                base_url=job.base_url,
+            )
+        except ValueError:
+            return None
 
     def _summarize(self, job: Job, started) -> RunSummary:
         events = self._bus.history(job.id)
@@ -508,7 +579,8 @@ class JobRunner:
             artifact_paths=[a.path for a in artifacts],
             event_count=len(events),
             tool_calls_used=self._budget.tool_calls_used,
-            next_phase="Phase 13 (Test Healer + Regression Engine: regression-test generation for a BUG_VERIFIED Finding)",
+            regression_test_path=execution.get("regression_test_path"),
+            next_phase="Phase 14 (Environment Engineering: Docker-based isolated environments, seed data, fault injection)",
         )
         self._write_artifact(job, "run-summary.json", summary.__dict__)
         return summary
