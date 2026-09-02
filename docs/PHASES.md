@@ -58,7 +58,7 @@ explicitly deferred.
 | 13 | **Test Healer** (selector/timing/locator fixes only, never weakens an assertion — every heal produces a diff) **+ Regression Engine, including regression-test generation**: a `BUG_VERIFIED` Finding gets a permanent, executable regression test file written to the project's own test suite (not just a `Test` row) — application source is never touched; re-run only the requirements/tests the World Model says a diff actually affects | ✅ (opt-in via `--write-regressions`; also closes Phase 5's change_relevance placeholder and Phase 8's stale-memory gap with a real git-diff signal — see notes) |
 | 14 | **Environment Engineering**: Docker-based isolated environments, seed data/users, fault injection (latency, timeout, service failure, duplicate event, stale state). Unlocks Advanced: concurrency, failure/recovery, chaos | ✅ (three standalone modules against a real Docker daemon/real HTTP proxy; JobRunner/CLI wiring deferred — see notes) |
 | 15 | **Security + Concurrency** hypothesis engine: cross-account access, privilege escalation, object enumeration, race conditions/duplicate actions — needs Phase 14's multi-identity/fault-injection environment to be real rather than single-case | ✅ (one executable concurrency/idempotency check, composing Phase 14's fault-injecting proxy with Phase 11's DB read; cross-account/IDOR, privilege escalation, and true concurrent races deferred — see notes) |
-| 16 | **Evaluation Lab + Harness Auditor**: multiple benchmark apps with known, seeded bugs; tracks the metrics in §42 (verified findings/compute, information gain/experiment, false-positive rate); harness/strategy changes must clear this bar before being kept — this is what makes Phase 8's "keep/revert" gate statistically meaningful instead of n=1 | not started |
+| 16 | **Evaluation Lab + Harness Auditor**: multiple benchmark apps with known, seeded bugs; tracks the metrics in §42 (verified findings/compute, information gain/experiment, false-positive rate); harness/strategy changes must clear this bar before being kept — this is what makes Phase 8's "keep/revert" gate statistically meaningful instead of n=1 | ✅ (ground-truth manifest across both existing example apps, a Harness Auditor computing all three §42 metrics, and a before/after quality-bar gate; a genuinely new benchmark app deferred — see notes) |
 | 17 | **Source connectors + durable multi-run architecture**: GitHub (App) as one `SourceProvider` implementation (never the core abstraction), immutable-commit resolution, isolated per-run workspace, Project-vs-Run state separation, crash-resume via existing checkpoint primitives (`LoopState`/`BudgetTracker`) hardened and actually tested against a mid-run kill | not started |
 | 18 | **Software Knowledge Graph + Code Intelligence retrieval**: promote the flat `WorldModel` into a real linked graph (Requirement→Feature→Workflow→UI→API→Code→DB→Test→Finding) with `search_code`/`read_symbol`/`find_callers`-style tools and hybrid (lexical+semantic+graph) retrieval. Deferred this late deliberately — it's only worth its complexity against a real multi-file, multi-language codebase, not a 70-line example app | not started |
 | 19 | **Visual / Accessibility / Desktop / Mobile execution channels** (Advanced testing areas) — new Executor channels behind the same Experiment/Observation/Oracle contracts Phase 6 already established, not a parallel system | not started |
@@ -1065,6 +1065,125 @@ duplicated request's *outcome*, not a genuine timing race between two
 in-flight requests — that needs a concurrency environment `HTTPServer`
 alone can't provide, left for when Phase 15's own scope gets revisited
 alongside Phase 19's Advanced-testing-channel work.
+
+## Phase 16 implementation notes
+
+The Evaluation Lab exists to answer one question the project's own docs
+had been putting off since Phase 5: is a Finding a real bug or a false
+alarm, and does a harness change make that better or worse? Every prior
+phase's "verified live" note was really "I, the implementer, know this is
+correct because I planted the bug" — true, but not something the *system*
+itself could check. Phase 16 turns that tribal knowledge into a real,
+machine-checkable ground-truth manifest and a real auditor that scores
+against it.
+
+- **`evaluation/benchmarks.py`** — the ground-truth manifest: every
+  requirement across `examples/requirements.md` and `examples/
+  db-requirements.md`, each tagged with its true answer (`Verdict.PASS`,
+  `Verdict.FAIL`, or `None` for "not yet executable, don't score it") and a
+  `note` citing exactly which phase planted the bug or confirmed the PASS.
+  No new benchmark app was built for this phase — seeding a *third* app
+  just to pad the sample size would be inventing signal, not adding it;
+  see "Deferred" below for why growing this manifest with a genuinely new
+  kind of ground truth is a better next investment than duplicating what's
+  already covered.
+- **`evaluation/harness_auditor.py` — `run_benchmark`/`run_all_benchmarks`**:
+  starts a benchmark's real app (in a background thread, matching `tests/
+  conftest.py`'s own fixture pattern, since this needs the exact same live-
+  server shape production code already relies on) and a fresh isolated
+  SQLite `Store` under a per-benchmark workdir, then — unlike a live
+  `JobRunner` run — executes *every* scored requirement directly via
+  `execution.experiment_runner.run_experiment`, not just the single
+  top-ranked candidate. That's a deliberate divergence from the main loop:
+  `JobRunner`'s one-experiment-per-run shape exists to act like a real,
+  budget-conscious agent picking its next best move; an audit needs to know
+  how *every* executable check performs against its known answer, so
+  ranking has nothing to contribute here (confirmed by checking: Test
+  Scientist weights only affect which candidate a live run picks *first*,
+  never the Executor/Oracle's verdict itself).
+- **Three real metrics (spec §42), not synthetic placeholders**:
+  - `verified_findings_per_compute` — true positives (a `FAIL` verdict on a
+    requirement whose ground truth is `FAIL`) divided by the real
+    `BudgetTracker.tool_calls_used` spent getting them.
+  - `information_gain_per_experiment` — the fraction of scored, executed
+    checks that landed on a decisive `PASS`/`FAIL` rather than
+    `UNCERTAIN`; an `UNCERTAIN` verdict answers nothing about the
+    requirement it was supposed to check, so it's honestly zero
+    information, not a partial credit.
+  - `false_positive_rate` — of the requirements genuinely satisfied
+    (ground truth `PASS`), the fraction the Oracle wrongly flagged `FAIL`.
+    This is the metric no prior phase could compute at all: every earlier
+    "verified live" note only ever showed a `FAIL` was correctly found, or
+    a `PASS` was correctly reported — never both classes measured together
+    against a labeled set, which is what a false-positive rate actually
+    needs.
+- **`evaluation/gate.py` — `evaluate_candidate`**: compares a candidate
+  harness's benchmark run against a baseline run of the *same* suite,
+  before/after a change under test. Kept only if the candidate regresses on
+  none of the three metrics — a single regression is a hard block, since a
+  harness change that trades one known bug for one new false alarm is not
+  an improvement no matter what an aggregate score says. Mirrors `learning/
+  engine.py`'s own `_MIN_RUNS_FOR_DECISION = 5` threshold deliberately (as
+  `_MIN_SCORED_REQUIREMENTS`, currently exactly met by the 8 real scored
+  requirements across both benchmarks) rather than inventing a new number.
+- **Complements Phase 8's Learning Engine, doesn't replace it.** Phase 8's
+  `learning/engine.py` docstring named this exact gap — "a real statistically-
+  meaningful A/B comparison ... is the Evaluation Lab's job" — but under a
+  stale "(Phase 17)" reference from before the 2026-09-01 scope
+  reconciliation renumbered phases; fixed as part of this phase, along with
+  a `job_runner.py` comment that had the same stale numbering for the
+  (still explicitly deferred — see below) Skill-version-correlation hook.
+  The two gates answer genuinely different questions: Phase 8's needs 5
+  *real production* runs to accumulate before it judges anything, which
+  could take a long time on a low-traffic project; Phase 16's gate judges
+  immediately, against known answers, but only for the two apps' worth of
+  ground truth this project has actually built — a harness could pass this
+  gate and still get `kept=False` from Phase 8 later if real, unlabeled
+  traffic turns out to look nothing like these benchmarks.
+- **Two real bugs found and fixed while verifying against the actual
+  apps, not a mock.** `db_module.get_engine`/`get_session` cache a single
+  global engine — auditing two benchmarks back-to-back in one process
+  needs an explicit `reset_engine_cache()` between them, or the second
+  benchmark would silently read/write the first one's SQLite file. And on
+  Windows, closing a `Store`'s session does *not* release the underlying
+  SQLite file handle the engine's connection pool still holds — a caller
+  that then tries to remove the benchmark's workdir (exactly what a
+  `tempfile.TemporaryDirectory` context manager does) hits a bare
+  `PermissionError`, caught immediately by actually running the auditor
+  against both real apps rather than only unit-testing its arithmetic.
+  Fixed with an explicit `engine.dispose()` before the cache reset.
+
+**Verified live**: `run_all_benchmarks` against both real, live example
+apps scores all 8 executable ground-truth requirements `"correct"` — 4
+confirmed bugs (Members-cannot-delete, owner-exclusivity, the Phase 11
+soft-delete, and the Phase 15 duplicate-creation check) and 4 confirmed
+PASSes (both apps' health checks, the creation-visibility contract, and the
+404-not-500 data invariant) — with `false_positive_rate=0.0` and
+`information_gain_per_experiment=1.0` (no `UNCERTAIN` verdicts at all).
+`evaluation/gate.py` is exercised against synthetic before/after audit sets
+covering every regression direction (a new false positive, a missed true
+positive, a newly-`UNCERTAIN` verdict, and a strict improvement across all
+three), since there is no *actual* regressed harness version to compare
+against yet — that comparison becomes real the next time an Executor/
+Oracle/requirements-extraction change needs to prove it didn't regress.
+
+**Deferred, explicitly.** A genuinely new benchmark app (rather than a
+third requirements file against the same two apps) is the highest-value
+next investment here, but building one just to inflate this phase's own
+sample size — without a concrete new bug shape it needs to cover — would be
+exactly the kind of invented signal this project's engineering rules
+refuse to add (the same reasoning Phase 10 used to defer service-to-
+service workflows until a real second service existed to test against).
+Correlating a Skill's version against measured benchmark outcomes (named
+as this phase's job back in Phase 12's own notes) stays deferred too:
+retrieved Skills don't influence any Executor/Oracle verdict in this fully
+deterministic pipeline yet, so there's nothing for a Skill version to
+correlate against — building that correlation now would be measuring
+noise. And `evaluate_candidate` has never yet gated a *real* harness change
+(no Executor/Oracle/requirements change has been proposed and tested
+through it) — it's proven correct against synthetic before/after audits,
+not yet exercised as a real pre-merge check on this project's own future
+work.
 
 ## Local-first model policy
 

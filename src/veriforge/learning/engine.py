@@ -6,9 +6,14 @@ single run is a very small sample. Rather than pretend that's enough to
 judge a Strategy, this records the metric every run and only renders a
 keep/revert verdict once `_MIN_RUNS_FOR_DECISION` prior runs exist —
 `kept=None` ("insufficient data") is an honest answer, not a guess dressed
-up as one. A real statistically-meaningful A/B comparison across many
-varied benchmark runs is the Evaluation Lab's job (Phase 17); this is the
-mechanism that lab will plug into, not a replacement for it.
+up as one. A real statistically-meaningful comparison across many varied,
+*ground-truth-backed* runs is the Evaluation Lab's job (Phase 16,
+`evaluation/harness_auditor.py` + `evaluation/gate.py`) — a pre-deployment
+check against known answers, answering a different, narrower question than
+this module does (which judges live, unlabeled production traffic over
+time). This module's mechanism is what a harness-level "kept" decision
+based on real production behavior still needs; the Evaluation Lab doesn't
+replace it, it complements it.
 """
 from __future__ import annotations
 

@@ -276,10 +276,14 @@ class JobRunner:
         self._write_artifact(job, "context-bundle.json", {"rendered": bundle.render_prompt()})
         # Phase 12: a standalone, inspectable trail of which Skills were
         # retrieved for this goal and at what version -- the hook a future
-        # Evaluation Lab (Phase 16) needs to eventually correlate a Skill's
-        # version against run outcomes. Not built here: that correlation
-        # itself, same as Phase 8's Learning Engine left the actual
-        # statistically-meaningful keep/revert call to Phase 16/17.
+        # correlation of Skill version against run outcomes would need.
+        # Phase 16's Evaluation Lab (evaluation/harness_auditor.py) built
+        # the benchmark infrastructure that correlation would run on, but
+        # deliberately didn't build the correlation itself: retrieved
+        # Skills don't yet influence any Executor/Oracle verdict in this
+        # fully-deterministic pipeline (there's no LLM-driven execution
+        # step consuming them), so there's nothing for a Skill version to
+        # actually correlate against yet -- still an honestly open hook.
         self._write_artifact(
             job, "skills-retrieved.json",
             {
@@ -584,8 +588,8 @@ class JobRunner:
             tool_calls_used=self._budget.tool_calls_used,
             regression_test_path=execution.get("regression_test_path"),
             next_phase=(
-                "Phase 16 (Evaluation Lab + Harness Auditor: benchmark apps with known, seeded bugs, "
-                "tracked verified-findings/compute and false-positive-rate metrics)"
+                "Phase 17 (Source connectors + durable multi-run architecture: GitHub App source "
+                "provider, immutable-commit resolution, isolated per-run workspace, crash-resume)"
             ),
         )
         self._write_artifact(job, "run-summary.json", summary.__dict__)

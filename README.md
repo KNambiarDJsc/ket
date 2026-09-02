@@ -4,7 +4,7 @@ Autonomous Software Verification & Testing OS. See `docs/PHASES.md` for the
 full architecture-to-phase mapping and the prior art (Ralph loop, Anthropic
 harness-engineering, EnvHarness, Claude Skills) this design draws from.
 
-This repo currently implements **Phase 0-15** (adds Project persistence/reuse
+This repo currently implements **Phase 0-16** (adds Project persistence/reuse
 across runs, episodic/semantic/procedural Memory, evaluation-gated
 Learning, two more executable invariant kinds — data-invariant status
 checks and the positive "only X may do this" authorization case — two
@@ -127,7 +127,21 @@ no idempotency protection at all, this finds and reproduces a genuine
 account/IDOR access, privilege escalation, and true concurrent (as opposed
 to network-duplicated) requests are deferred — see `docs/PHASES.md` for why.
 
-Everything past that (the rest of Security/Concurrency, evaluation lab...)
+Phase 16 adds the Evaluation Lab: a ground-truth manifest
+(`evaluation/benchmarks.py`) tagging every requirement across both example
+apps with its true answer (a known planted bug, a known-good PASS, or "not
+yet executable" for the one temporal requirement no Executor covers), and a
+Harness Auditor (`evaluation/harness_auditor.py`) that executes every
+scored requirement directly against the real, live apps and computes the
+three metrics spec §42 calls for: verified findings per compute, information
+gain per experiment, and false-positive rate. Run against both real apps,
+it scores all 8 executable requirements correctly — 4 confirmed bugs, 4
+confirmed PASSes, zero false positives. `evaluation/gate.py` compares a
+before/after benchmark run and blocks a harness change that regresses any
+one of the three metrics, even if the aggregate looks fine — the
+statistically-meaningful comparison Phase 8's Learning Engine was waiting on.
+
+Everything past that (the rest of Security/Concurrency, source connectors...)
 is future phase work — see `docs/PHASES.md` for the tracker.
 
 ## Setup
