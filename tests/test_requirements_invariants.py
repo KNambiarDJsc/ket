@@ -60,6 +60,50 @@ def test_unmatched_pattern_returns_none():
     assert structured is None
 
 
+# ---- Phase 10: contract extraction ----
+
+def test_creation_visible_in_listing_extracted():
+    # This sentence contains "after" so the parser's own classifier lands it
+    # as ORDERING -- _extract_ordering doesn't match "appear ... after", so
+    # it falls through to the Kind-independent contract fallback.
+    structured = extract_invariant(
+        req(
+            "A newly created project must appear in GET /projects immediately after creation.",
+            RequirementKind.ORDERING,
+        )
+    )
+    assert structured == {
+        "contract": "creation_visible_in_listing",
+        "object": "project",
+        "method": "GET",
+        "path": "/projects",
+    }
+
+
+def test_endpoint_exposed_extracted():
+    structured = extract_invariant(
+        req("The service must expose a health check at GET /.", RequirementKind.FUNCTIONAL)
+    )
+    assert structured == {
+        "contract": "endpoint_exposed",
+        "label": "health check",
+        "method": "GET",
+        "path": "/",
+    }
+
+
+# ---- Phase 11: DB-integrity extraction ----
+
+def test_db_removal_extracted():
+    structured = extract_invariant(
+        req(
+            "Deleted projects must be permanently removed from the database, not merely hidden.",
+            RequirementKind.FUNCTIONAL,
+        )
+    )
+    assert structured == {"db_check": "removed_after_delete", "object": "projects", "action": "delete"}
+
+
 def test_negative_falls_back_to_status_codes_when_no_actor_pattern():
     # e.g. parser classified this NEGATIVE via the word "not", but it's really
     # a data invariant about status codes, not an actor/action sentence.

@@ -110,3 +110,20 @@ def test_investigator_notes_when_endpoint_does_mention_role_check():
     root_cause = build_root_cause(checked_endpoint, verdict, reproduction=None)
     assert "DOES reference a role/permission-looking identifier" in root_cause
     assert "needs code review" in root_cause
+
+
+def test_investigator_omits_role_check_note_for_non_authorization_requirement():
+    # Phase 10/11: a contract or DB-integrity Finding isn't about role checks
+    # at all -- grafting that commentary on would be a non-sequitur.
+    endpoint = ApiEndpoint(
+        project_id="p", method="DELETE", path="/projects/", source_file="app.py", source_line=75, mentions_role_check=False,
+    )
+    verdict = OracleVerdict(Verdict.FAIL, 0.9, "not present in the database", "still present", "reasoning")
+    db_check_requirement = Requirement(
+        project_id="p", source_text="Deleted projects must be permanently removed from the database.",
+        kind=RequirementKind.FUNCTIONAL, critical=True,
+        structured={"db_check": "removed_after_delete", "object": "projects", "action": "delete"},
+    )
+    root_cause = build_root_cause(endpoint, verdict, reproduction=None, requirement=db_check_requirement)
+    assert "role/permission-check" not in root_cause
+    assert root_cause == "reasoning"

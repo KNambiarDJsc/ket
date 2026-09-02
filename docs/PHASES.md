@@ -52,9 +52,9 @@ explicitly deferred.
 | 7 | Triager, Investigator, Reproducer | ✅ |
 | 8 | **Project persistence/reuse + Memory** (episodic/semantic/procedural) **+ evaluation-gated Learning** — a Strategy's scoring weights persist per project and only get "kept" once measurably better across enough runs; a prior run's confirmed Finding marks its Unknown resolved so later runs don't re-flag it | ✅ |
 | 9 | **Broaden Oracle/Executor invariant coverage**: data-invariant (expected/forbidden status) and the positive `"allowed_only_for_this_actor"` case are now executable alongside `expected=="denied"`. Temporal and ordering remain unexecuted (see notes) | ✅ |
-| 10 | **API/Integration/System testing breadth**: multi-endpoint contract checks, request/response schema assertions, service-to-service workflows (not just one endpoint in isolation). Covers Core: API, integration, system testing | not started |
-| 11 | **Database Observation**: a real DB-backed example app + DB state-comparison oracle (Level 3 today only checks via a follow-up GET; needs a real adapter for SQL/NoSQL state checks). Covers Core: data integrity | not started |
-| 12 | **Skill System**: `skills/*/SKILL.md` as versioned, evaluable procedural knowledge; a retriever the Context Compiler calls, not a blob injected into every context | not started |
+| 10 | **API/Integration/System testing breadth**: multi-endpoint contract checks, request/response schema assertions, service-to-service workflows (not just one endpoint in isolation). Covers Core: API, integration, system testing | ✅ (endpoint-exposure + creation-visibility contracts; true service-to-service workflows deferred — see notes) |
+| 11 | **Database Observation**: a real DB-backed example app + DB state-comparison oracle (Level 3 today only checks via a follow-up GET; needs a real adapter for SQL/NoSQL state checks). Covers Core: data integrity | ✅ (SQLite adapter + one executable data-integrity check; NoSQL and broader state comparisons deferred — see notes) |
+| 12 | **Skill System**: `skills/*/SKILL.md` as versioned, evaluable procedural knowledge; a retriever the Context Compiler calls, not a blob injected into every context | ✅ (retriever + Context Compiler integration + 3 real skills documenting Phases 6/10/11's own testing approaches; evaluation itself deferred to Phase 16) |
 | 13 | **Test Healer** (selector/timing/locator fixes only, never weakens an assertion — every heal produces a diff) **+ Regression Engine, including regression-test generation**: a `BUG_VERIFIED` Finding gets a permanent, executable regression test file written to the project's own test suite (not just a `Test` row) — application source is never touched; re-run only the requirements/tests the World Model says a diff actually affects | not started |
 | 14 | **Environment Engineering**: Docker-based isolated environments, seed data/users, fault injection (latency, timeout, service failure, duplicate event, stale state). Unlocks Advanced: concurrency, failure/recovery, chaos | not started |
 | 15 | **Security + Concurrency** hypothesis engine: cross-account access, privilege escalation, object enumeration, race conditions/duplicate actions — needs Phase 14's multi-identity/fault-injection environment to be real rather than single-case | not started |
@@ -511,6 +511,233 @@ all, so a synthesized "not-owner" role can delete a project exactly as
 easily as "owner" can (`Verdict: FAIL`, `reproduced: true`,
 `SECURITY_FINDING`, confidence 0.85) — found via the new capability, not
 hardcoded.
+
+## Phase 10 implementation notes
+
+Two of the three requested shapes (multi-endpoint contract checks,
+request/response schema assertions) became genuinely executable against the
+example app; true service-to-service workflows deliberately did not — see
+below for why.
+
+- **A new requirement shape, not a new `RequirementKind`.** Both new
+  contracts are recognized by `requirements/invariants.py`'s
+  `_extract_contract`, tried as a Kind-independent fallback (same slot as
+  the existing data-invariant fallback) rather than added as their own
+  `RequirementKind` — the parser's keyword classifier already lands these
+  two phrasings on ORDERING ("...after creation") and FUNCTIONAL ("must
+  expose...") for unrelated reasons, and forcing a new Kind would duplicate
+  that routing rather than replace it.
+  - `"creation_visible_in_listing"` — "A newly created X must appear in GET
+    \<path\> immediately after creation." Unlike every prior invariant
+    shape, this one names its own endpoint literally in the text.
+  - `"endpoint_exposed"` — "The service must expose Y at METHOD \<path\>."
+    Also literal.
+- **A new endpoint-resolution path, not a replacement for the old one.**
+  Every prior invariant shape (authorization, data-invariant) resolves to a
+  concrete endpoint via `match_endpoint_for_requirement`'s action/object
+  fuzzy match against AST-discovered routes — necessary because the
+  requirement text never names a path directly ("Members cannot delete
+  projects." doesn't say `/projects/<id>`). Phase 10's two contract shapes
+  *do* name their path directly, so `world_model/builder.
+  resolve_literal_endpoint` takes a different approach: prefer the real
+  AST-discovered `ApiEndpoint` (so evidence still cites a real
+  source_file:line) when static analysis independently found that exact
+  route, otherwise synthesize one from the requirement's own literal text
+  (tagged with the `UNCONFIRMED_ENDPOINT_SOURCE` sentinel) — a requirement
+  naming a route that static analysis *didn't* find is itself informative
+  (drift between what's declared and what's implemented), not a reason to
+  skip the check. `match_endpoint_for_requirement` now dispatches to this
+  path whenever `structured` carries a `"contract"` key, so
+  `job_runner._execute_top_experiment`'s existing endpoint-resolution call
+  needed no changes at all.
+- **`execute_endpoint_exposure_check`** (`http_executor.py`) — single-
+  endpoint reachability: call exactly the declared method+path, no
+  resource creation needed. **`judge_endpoint_exposure`** (Oracle Level 1):
+  2xx/3xx = PASS, else FAIL.
+- **`execute_creation_visibility_check`** — the actual multi-endpoint
+  contract: POST to create a throwaway resource (via the same
+  `find_creation_endpoint` object-keyword match Phase 6 introduced), then
+  GET the *separately named* listing endpoint and search its response body
+  (recursively, since envelope shape varies — a bare list vs.
+  `{"projects": [...]}`) for an entry matching the created resource's `id`.
+  **`judge_creation_visibility`**: FAIL if the resource isn't found in the
+  listing at all (`not_found_in_listing`); FAIL if it's found but any field
+  from the creation response is missing or has a different value there
+  (`schema_mismatch` — a real request/response schema-consistency
+  assertion, not just a presence check); PASS only when both endpoints'
+  responses genuinely agree.
+- `experiment_runner.is_executable`/`run_experiment` gained two more
+  dispatch branches keyed on `structured["contract"]`, alongside the
+  existing `expected`/`expected_status` branches — a sixth kind slots in
+  the same way later. No changes needed to `triager.py`/`reproducer.py`/
+  `investigator.py`: they already operate generically on
+  `Requirement.kind`/`OracleVerdict`, not on the invariant shape.
+- **Service-to-service workflows deliberately not built.** The requested
+  scope explicitly includes "service-to-service workflows," but this
+  project has exactly one example app (a single process) — building a
+  cross-service contract check against it would mean faking a second
+  service just to exercise the code path, which is exactly the kind of
+  invented-signal shortcut this project's own philosophy (see Phase 9's
+  temporal/ordering deferral, and Phase 5's honestly-uncomputed
+  `change_relevance`) refuses to take. This waits for a real multi-service
+  fixture, likely alongside Phase 14's environment engineering.
+
+**Verified against the example app**: both new contracts resolve against
+real AST-discovered endpoints (`GET /` at the health-check handler, `GET
+/projects` at the listing handler) and execute as genuine PASSes — the
+example app's synchronous, single-process design means a POST really is
+visible in the very next GET with matching fields, and `/` really does
+answer. This is a deliberately different outcome from Phases 6/9 (which
+found real bugs): Phase 10 confirms the Oracle also reports PASS honestly
+on requirements the app actually satisfies, not just FAIL on the ones it
+doesn't. Both requirements already existed in `examples/requirements.md`
+since Phase 1 — Phase 10 makes two previously-unstructured, unexecuted
+lines finally checkable, the same iterative pattern Phase 9 used for its
+own two requirements.
+
+## Phase 11 implementation notes
+
+One executable data-integrity check, backed by a genuinely new capability
+(a direct database read) rather than another API call — deliberately
+narrow, matching every prior phase's "one real vertical slice, not a
+grab-bag" scoping.
+
+- **A second example app, not a retrofit of the first.** `examples/
+  example-db-app/app.py` is a new SQLite-backed stdlib server (still
+  dependency-free) rather than adding persistence to `example-app`: the two
+  apps test genuinely different things (an in-memory dict has no
+  independent state to compare against; a database does), and retrofitting
+  risked destabilizing every earlier phase's tests against the original
+  app. `examples/db-requirements.md` is its own requirements file.
+- **The planted bug is a soft delete, not a missing check.** `DELETE
+  /projects/<id>` only sets a `deleted` flag; `GET /projects` filters
+  `WHERE deleted = 0`. Through the API the project genuinely looks gone —
+  Phase 6's Level-3 state check (a follow-up GET) would report "not
+  present" and judge this PASS. This is the concrete case Phase 11 exists
+  for: **the API cannot be trusted to verify its own claims**, so the
+  Oracle needs a channel that bypasses it entirely.
+- **`database.query_sqlite`** (new harness tool, `harness/builtin_tools.py`)
+  wraps `execution/db_executor.run_read_only_query`, which refuses anything
+  that isn't a `SELECT` — enforced in the function itself, not just by
+  convention, so this stays READ risk (it can only ever observe, never
+  mutate) rather than needing DESTRUCTIVE like a hypothetical
+  `database.execute`.
+- **`execute_db_removal_check`** (`db_executor.py`) — create via POST
+  (reusing Phase 6's `find_creation_endpoint`), delete via the resolved
+  DELETE endpoint, then `SELECT COUNT(*) FROM <table> WHERE id = ?`
+  directly against the SQLite file. The table name comes from the same
+  `object_keyword()` match already used to resolve requirement→endpoint,
+  validated against `^[A-Za-z_][A-Za-z0-9_]*$` before being interpolated
+  into SQL (identifiers can't be parameterized the way values can — `params`
+  still carries the id) — a requirement naming an unsafe table string fails
+  loudly rather than being interpolated blind. **`judge_db_removal`**
+  (Oracle Level 3, direct-DB variant): FAIL if the row count is nonzero,
+  PASS only if the row is genuinely gone.
+- **A new requirement shape, reusing the old resolution path.**
+  `requirements/invariants.py`'s `_extract_db_check` recognizes "Deleted X
+  must be [actually/permanently] removed from the database" and emits the
+  *same* `action`/`object` keys the Phase 6 authorization shape uses — so
+  `match_endpoint_for_requirement` needed no changes at all to resolve it
+  to a real DELETE endpoint via AST-discovered routes.
+- **`db_path` is an explicit input, never inferred.** Like `--url`, a job
+  is given `--db-path` (new CLI flag, new optional `Job.db_path` field) —
+  guessing a connection string out of source would violate this project's
+  own "don't guess" rule, and would be actively unsafe if guessed wrong.
+  Without `--db-path`, `job_runner._execute_top_experiment` skips a
+  `db_check` candidate entirely (queued, not attempted-and-failed) and
+  moves to the next-ranked one, exactly like a missing `--url` skips
+  execution entirely.
+- **The Investigator learned to stay quiet when it has nothing relevant to
+  say.** `investigation/investigator.build_root_cause` unconditionally
+  commented on role/permission-check presence — correct for every prior
+  Finding (all authorization-shaped), a non-sequitur for a data-integrity
+  bug that has nothing to do with role checks. It now takes the originating
+  `Requirement` and only includes that note when the requirement's kind
+  actually makes it relevant (AUTHORIZATION/NEGATIVE/SECURITY); omitting the
+  argument (existing call sites) keeps the old always-comment behavior.
+- **Deferred, explicitly.** NoSQL adapters, DB state comparison for
+  non-DELETE actions (e.g. "an edit must actually persist"), and comparing
+  DB state across a service boundary all wait for a real need to exercise
+  them — same "don't build past what's demonstrated" discipline as every
+  prior phase's deferrals.
+
+**Verified against the example DB app, end to end**: created a project via
+POST, deleted it via the API (which reported `200 {"deleted": ...}`),
+then read the `projects` table directly and found the row still present
+(`deleted=1`, but the row itself intact) — confirming a real
+`APPLICATION_BUG` (not a security finding — this requirement's kind is
+FUNCTIONAL, not authorization-shaped) with reproduction on a second
+independent run. Root cause reads the Oracle's own reasoning plus the
+reproduction note, with no role-check commentary grafted on. Running the
+same job without `--db-path` leaves the data-integrity requirement queued
+and instead executes the next-ranked candidate (the health-check exposure
+contract from Phase 10, reused here), which genuinely PASSes.
+
+## Phase 12 implementation notes
+
+The retriever, not the skill content, is the actual deliverable here — the
+spec is explicit that the point is "a retriever the Context Compiler calls,
+not a blob injected into every context," so the scoring/selection mechanism
+got the engineering attention, and the three shipped skills are honest
+documentation of testing approaches this project had *already built*
+(Phases 6, 10, 11), not speculative new capability.
+
+- **No new relevance signal invented.** `skills/retriever.SkillRetriever`
+  scores each Skill's description against the goal using the exact same
+  `keyword_overlap()` the Context Compiler already used for requirements/
+  unknowns — promoted from a Context-Compiler-private function to
+  `context/relevance.py` so both consumers share one real signal instead of
+  each inventing their own. A Skill with zero overlap is excluded outright,
+  not merely ranked low — returning it anyway would mean every Skill shows
+  up regardless of the goal, defeating retrieval entirely.
+- **Progressive disclosure, enforced by the type, not by convention.**
+  `ContextBundle.relevant_skills` holds `SkillSummary` (name/description/
+  version/score) — no `body` field exists on that type at all, so a full
+  SKILL.md's procedural content can't accidentally leak into every compiled
+  bundle regardless of relevance. A consumer that decides to actually use a
+  retrieved Skill reads `.body` off the `Skill` object `SkillRetriever.
+  retrieve()` returns directly — the compiled bundle is deliberately not
+  that path.
+- **No YAML dependency for frontmatter.** `skills/loader.py` parses flat
+  `key: value` lines by hand; a SKILL.md's frontmatter here is three fields
+  (name/description/version), not nested structure, so a real YAML parser
+  would be an unneeded dependency for what a few lines of string splitting
+  handle correctly — consistent with this project's "don't add deps you
+  don't need" pattern elsewhere (e.g. sqlite3/tree-sitter-free AST parsing
+  in Phase 3).
+- **Skills are VeriForge's own knowledge, not the target's.** `skills/`
+  lives at the VeriForge repo root (sibling to `docs/`, `examples/`),
+  resolved by `JobRunner` relative to its own source file
+  (`_DEFAULT_SKILLS_DIR`), never inside `--repo` (the thing being tested).
+  A missing directory degrades to "no skills available," not a crash —
+  the same honest-degradation shape as every other optional capability in
+  this system (no Ollama, no `--url`, no `--db-path`).
+- **"Versioned, evaluable" — the hook, not the full mechanism.** Each
+  Skill's frontmatter carries a `version` int, and every job now writes
+  `skills-retrieved.json` (name/version/score/description per match) —
+  exactly the kind of run-indexed record Phase 8's Learning Engine and
+  Phase 16's Evaluation Lab already use for their own "not yet enough data
+  to judge" honesty pattern. Actually correlating a Skill version against
+  measured run outcomes is Phase 16's job (a statistically meaningful
+  comparison needs the same benchmark infrastructure the Learning Engine's
+  keep/revert call is still waiting on); building that correlation now,
+  ungated by real evaluation data, would be exactly the "guess dressed up
+  as a signal" this project's engineering rules refuse to do.
+- **Three real skills, not placeholders**: `authorization-testing` (Phases
+  6/9's actor/action/object + state-over-status pattern),
+  `data-integrity-testing` (Phase 11's don't-trust-the-API-read-the-DB
+  pattern), `api-contract-testing` (Phase 10's literal-endpoint contract
+  shapes). Each cross-references the others' "when this doesn't apply"
+  case, so retrieval choosing between them is meaningful rather than
+  arbitrary.
+
+**Verified live**: a real end-to-end job run (`test_full_job_lifecycle_
+reaches_completed`) against the bundled example app retrieves real Skills
+for the actual production goal string ("Verify all critical requirements
+before release") — not a synthetic fixture — and `skills-retrieved.json`
+records which ones and at what version. An irrelevant Skill (crafted with
+zero keyword overlap in `test_context_compiler.py`) is correctly excluded,
+not merely ranked last.
 
 ## Local-first model policy
 

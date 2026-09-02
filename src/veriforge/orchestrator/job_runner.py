@@ -42,9 +42,20 @@ from veriforge.memory.procedural import get_active_strategy
 from veriforge.memory.semantic import apply_semantic_memory
 from veriforge.orchestrator.state_machine import JobStateMachine
 from veriforge.requirements.parser import parse_requirements_file
+from veriforge.skills.loader import discover_skills
+from veriforge.skills.retriever import SkillRetriever
 from veriforge.storage.repository import Store
 from veriforge.strategist.scientist import promote_to_tests, rank_experiments
 from veriforge.world_model.builder import build_world_model, match_endpoint_for_requirement
+
+# Phase 12: VeriForge's own procedural knowledge about how it tests things
+# (see skills/*/SKILL.md) -- distinct from --repo, which is the *target*
+# under test. Resolved relative to this source file so an editable install
+# (this project's only supported install mode; see README) finds it
+# regardless of the caller's cwd. A missing directory (e.g. a non-editable
+# install with no bundled skills/) degrades to "no skills available"
+# rather than raising -- see skills/loader.discover_skills.
+_DEFAULT_SKILLS_DIR = Path(__file__).resolve().parents[3] / "skills"
 
 
 @dataclass
@@ -82,6 +93,7 @@ class JobRunner:
         permission_policy: PermissionPolicy | None = None,
         max_tool_calls: int = 50,
         max_runtime_seconds: float = 900.0,
+        skills_dir: str | Path | None = _DEFAULT_SKILLS_DIR,
     ):
         self._store = store
         self._bus = bus
@@ -93,6 +105,7 @@ class JobRunner:
         self._max_runtime_seconds = max_runtime_seconds
         self._registry = ToolRegistry()
         register_builtin_tools(self._registry, llm)
+        self._skill_retriever = SkillRetriever(discover_skills(skills_dir) if skills_dir else [])
 
     def _write_artifact(self, job: Job, kind: str, data: dict) -> Artifact:
         job_dir = self._artifacts_root / job.id
@@ -238,12 +251,29 @@ class JobRunner:
             world_model,
             goal="Verify all critical requirements before release",
             tool_registry=self._registry,
+            skill_retriever=self._skill_retriever,
             constraints={
                 "tool_calls_used": self._budget.tool_calls_used,
                 "max_tool_calls": self._budget.max_tool_calls,
             },
         )
         self._write_artifact(job, "context-bundle.json", {"rendered": bundle.render_prompt()})
+        # Phase 12: a standalone, inspectable trail of which Skills were
+        # retrieved for this goal and at what version -- the hook a future
+        # Evaluation Lab (Phase 16) needs to eventually correlate a Skill's
+        # version against run outcomes. Not built here: that correlation
+        # itself, same as Phase 8's Learning Engine left the actual
+        # statistically-meaningful keep/revert call to Phase 16/17.
+        self._write_artifact(
+            job, "skills-retrieved.json",
+            {
+                "goal": bundle.goal,
+                "retrieved": [
+                    {"name": s.name, "version": s.version, "score": s.score, "description": s.description}
+                    for s in bundle.relevant_skills
+                ],
+            },
+        )
 
         self._bus.publish(
             job.id,
@@ -314,6 +344,11 @@ class JobRunner:
             requirement = requirements_by_id.get(experiment.requirement_id) if experiment.requirement_id else None
             if not is_executable(requirement):
                 continue
+            # Phase 11: a db_check requirement needs a real database to read
+            # from -- without --db-path, leave it queued rather than attempt
+            # (and fail) an execution with nothing to connect to.
+            if requirement.structured.get("db_check") and not job.db_path:
+                continue
             endpoint = match_endpoint_for_requirement(requirement, world_model.api_endpoints)
             if endpoint is None:
                 continue
@@ -330,6 +365,7 @@ class JobRunner:
                     all_endpoints=world_model.api_endpoints,
                     tool_executor=self._executor,
                     test=test,
+                    db_path=job.db_path,
                 )
             except BudgetExceededError:
                 raise
@@ -389,7 +425,7 @@ class JobRunner:
                 "note": f"executed '{experiment.hypothesis}' -> {result.oracle_verdict.verdict.value}",
             }
 
-        return {**not_run, "note": "no candidate experiment resolved to an executable (endpoint-matched, expected='denied') check"}
+        return {**not_run, "note": "no candidate experiment resolved to an executable, endpoint-matched check"}
 
     def _investigate_finding(self, job: Job, requirement, endpoint, world_model, test, result) -> dict:
         """Phase 7: Triager classifies, Reproducer re-runs the check once
@@ -406,6 +442,7 @@ class JobRunner:
                 tool_executor=self._executor,
                 test=test,
                 first_verdict=result.oracle_verdict.verdict,
+                db_path=job.db_path,
             )
         except BudgetExceededError:
             raise
@@ -426,7 +463,7 @@ class JobRunner:
         if not reproduction.reproducible:
             category = FailureCategory.FLAKINESS
 
-        root_cause = build_root_cause(endpoint, result.oracle_verdict, reproduction)
+        root_cause = build_root_cause(endpoint, result.oracle_verdict, reproduction, requirement)
         result.finding.category = category
         result.finding.root_cause = root_cause
         result.finding.reproduced = reproduction.reproducible
@@ -471,7 +508,7 @@ class JobRunner:
             artifact_paths=[a.path for a in artifacts],
             event_count=len(events),
             tool_calls_used=self._budget.tool_calls_used,
-            next_phase="Phase 10 (API/Integration/System testing breadth: multi-endpoint contract checks)",
+            next_phase="Phase 13 (Test Healer + Regression Engine: regression-test generation for a BUG_VERIFIED Finding)",
         )
         self._write_artifact(job, "run-summary.json", summary.__dict__)
         return summary

@@ -14,10 +14,23 @@ exact expected/forbidden HTTP status assertion) and
 `judge_authorization`: the named actor must succeed *and* a different role
 must be denied, or it isn't actually exclusive).
 
-Temporal and ordering invariants still have no Oracle implementation —
-Phase 9 only executes what it can honestly judge; everything else stays
-unexecuted (see execution/http_executor.py and execution/experiment_runner.
-is_executable).
+Phase 10 adds `judge_endpoint_exposure` (Level 1 — is the declared endpoint
+actually reachable?) and `judge_creation_visibility` (a real multi-endpoint
+contract judgment: did the created resource show up in the listing endpoint
+at all, and if so, do its fields still match the creation response? — a
+schema-consistency check, not just a presence check).
+
+Phase 11 adds `judge_db_removal`: a genuine Level 3 upgrade over
+`judge_authorization`'s state check. That one confirms "gone" via a
+follow-up API GET, which only proves what the application is willing to
+report; this one reads the database row directly, so it can catch an
+application that hides a row from its own API without actually deleting it
+— a bug Phase 6's API-only state check cannot see by construction.
+
+Temporal and true cross-service workflows still have no Oracle
+implementation — Phase 9/10/11 only execute what they can honestly judge;
+everything else stays unexecuted (see execution/http_executor.py,
+execution/db_executor.py, and execution/experiment_runner.is_executable).
 """
 from __future__ import annotations
 
@@ -132,4 +145,52 @@ def judge_allowed_only_for_actor(
     return OracleVerdict(
         Verdict.PASS, 0.85, "allowed_only_for_this_actor", "allowed_only_for_actor",
         f"The named actor could perform the action; a different role was denied (status={other_status}).",
+    )
+
+
+def judge_endpoint_exposure(expected_method: str, expected_path: str, response_status: int) -> OracleVerdict:
+    if 200 <= response_status < 400:
+        return OracleVerdict(
+            Verdict.PASS, 0.9, "reachable (2xx/3xx)", str(response_status),
+            f"{expected_method} {expected_path} answered with {response_status}, "
+            "as the requirement expects it to be exposed.",
+        )
+    return OracleVerdict(
+        Verdict.FAIL, 0.85, "reachable (2xx/3xx)", str(response_status),
+        f"{expected_method} {expected_path} answered with {response_status} instead of a reachable status "
+        "— this violates the requirement that this endpoint must be exposed.",
+    )
+
+
+def judge_db_removal(row_still_in_db: bool) -> OracleVerdict:
+    if row_still_in_db:
+        return OracleVerdict(
+            Verdict.FAIL, 0.9, "not present in the database", "still present in the database",
+            "The API reported the resource as deleted, but a direct database read shows the row is "
+            "still physically present — this violates the requirement, and a follow-up API GET alone "
+            "would not have caught it (the application itself hides the row from that endpoint).",
+        )
+    return OracleVerdict(
+        Verdict.PASS, 0.9, "not present in the database", "not present in the database",
+        "A direct database read confirms the row was actually removed, not just hidden from the API.",
+    )
+
+
+def judge_creation_visibility(listing_entry: dict | None, schema_mismatches: list[str]) -> OracleVerdict:
+    if listing_entry is None:
+        return OracleVerdict(
+            Verdict.FAIL, 0.85, "visible in the listing with matching fields", "not_found_in_listing",
+            "The newly created resource did not appear in the listing endpoint's response at all "
+            "— this violates the requirement.",
+        )
+    if schema_mismatches:
+        return OracleVerdict(
+            Verdict.FAIL, 0.8, "visible in the listing with matching fields", "schema_mismatch",
+            "The resource appeared in the listing, but its fields don't match the creation response: "
+            + "; ".join(schema_mismatches),
+        )
+    return OracleVerdict(
+        Verdict.PASS, 0.9, "visible in the listing with matching fields", "consistent",
+        "The newly created resource appeared in the listing endpoint's response with fields matching "
+        "the creation response.",
     )

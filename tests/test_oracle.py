@@ -1,5 +1,12 @@
 from veriforge.domain.enums import Verdict
-from veriforge.oracle.oracle import judge_allowed_only_for_actor, judge_authorization, judge_data_invariant
+from veriforge.oracle.oracle import (
+    judge_allowed_only_for_actor,
+    judge_authorization,
+    judge_creation_visibility,
+    judge_data_invariant,
+    judge_db_removal,
+    judge_endpoint_exposure,
+)
 
 
 def test_denied_status_with_resource_gone_matches_expected_denied():
@@ -83,3 +90,51 @@ def test_allowed_only_uncertain_when_actor_itself_is_denied():
         actor_status=403, actor_resource_gone=False, other_status=403, other_resource_gone=False,
     )
     assert verdict.verdict == Verdict.UNCERTAIN
+
+
+# ---- judge_endpoint_exposure (Phase 10) ----
+
+def test_endpoint_exposure_passes_on_2xx():
+    verdict = judge_endpoint_exposure(expected_method="GET", expected_path="/", response_status=200)
+    assert verdict.verdict == Verdict.PASS
+
+
+def test_endpoint_exposure_fails_on_404():
+    verdict = judge_endpoint_exposure(expected_method="GET", expected_path="/health", response_status=404)
+    assert verdict.verdict == Verdict.FAIL
+    assert "must be exposed" in verdict.reasoning
+
+
+# ---- judge_creation_visibility (Phase 10) ----
+
+def test_creation_visibility_fails_when_not_found_in_listing():
+    verdict = judge_creation_visibility(listing_entry=None, schema_mismatches=[])
+    assert verdict.verdict == Verdict.FAIL
+    assert verdict.observed == "not_found_in_listing"
+
+
+def test_creation_visibility_fails_on_schema_mismatch():
+    verdict = judge_creation_visibility(
+        listing_entry={"id": "abc", "name": "different"},
+        schema_mismatches=["field 'name' = 'original' at creation but 'different' in the listing"],
+    )
+    assert verdict.verdict == Verdict.FAIL
+    assert verdict.observed == "schema_mismatch"
+
+
+def test_creation_visibility_passes_when_consistent():
+    verdict = judge_creation_visibility(listing_entry={"id": "abc", "name": "x"}, schema_mismatches=[])
+    assert verdict.verdict == Verdict.PASS
+
+
+# ---- judge_db_removal (Phase 11) ----
+
+def test_db_removal_fails_when_row_still_present():
+    verdict = judge_db_removal(row_still_in_db=True)
+    assert verdict.verdict == Verdict.FAIL
+    assert "still physically present" in verdict.reasoning
+
+
+def test_db_removal_passes_when_row_actually_gone():
+    verdict = judge_db_removal(row_still_in_db=False)
+    assert verdict.verdict == Verdict.PASS

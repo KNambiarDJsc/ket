@@ -77,3 +77,64 @@ def test_non_critical_requirements_produce_no_unknown():
     world_model = build_world_model("proj_1", [req], {})
 
     assert world_model.unknowns == []
+
+
+# ---- Phase 10: contract requirements ----
+
+def test_creation_visible_contract_confirmed_by_static_analysis():
+    repo_facts = {
+        "endpoints": [
+            {"method": "POST", "path": "/projects", "source_file": "app.py", "source_line": 38, "mentions_role_check": False},
+            {"method": "GET", "path": "/projects", "source_file": "app.py", "source_line": 30, "mentions_role_check": False},
+        ],
+    }
+    req = Requirement(
+        project_id="proj_1",
+        source_text="A newly created project must appear in GET /projects immediately after creation.",
+        kind=RequirementKind.ORDERING, critical=True,
+    )
+    world_model = build_world_model("proj_1", [req], repo_facts)
+
+    assert req.structured == {
+        "contract": "creation_visible_in_listing", "object": "project", "method": "GET", "path": "/projects",
+    }
+    rationale = world_model.unknowns[0].rationale
+    assert "Matched to GET /projects" in rationale
+    assert "independently confirmed by static analysis (app.py:30)" in rationale
+    assert "Phase 10" in rationale
+
+
+def test_endpoint_exposed_contract_not_confirmed_by_static_analysis():
+    req = Requirement(
+        project_id="proj_1", source_text="The service must expose a health check at GET /.",
+        kind=RequirementKind.FUNCTIONAL, critical=True,
+    )
+    world_model = build_world_model("proj_1", [req], {"endpoints": []})
+
+    assert req.structured == {
+        "contract": "endpoint_exposed", "label": "health check", "method": "GET", "path": "/",
+    }
+    rationale = world_model.unknowns[0].rationale
+    assert "Matched to GET /" in rationale
+    assert "NOT independently confirmed by static analysis" in rationale
+
+
+def test_db_removal_requirement_matches_delete_endpoint():
+    repo_facts = {
+        "endpoints": [
+            {"method": "POST", "path": "/projects", "source_file": "app.py", "source_line": 60, "mentions_role_check": False},
+            {"method": "DELETE", "path": "/projects/", "source_file": "app.py", "source_line": 75, "mentions_role_check": False},
+        ],
+    }
+    req = Requirement(
+        project_id="proj_1",
+        source_text="Deleted projects must be permanently removed from the database, not merely hidden.",
+        kind=RequirementKind.FUNCTIONAL, critical=True,
+    )
+    world_model = build_world_model("proj_1", [req], repo_facts)
+
+    assert req.structured == {"db_check": "removed_after_delete", "object": "projects", "action": "delete"}
+    rationale = world_model.unknowns[0].rationale
+    assert "Matched to DELETE /projects/" in rationale
+    assert "Phase 11" in rationale
+    assert "data-integrity requirement" in rationale

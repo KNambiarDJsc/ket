@@ -34,6 +34,9 @@ def verify(
     requirements: Optional[str] = typer.Option(
         None, "--requirements", help="Path to a requirements markdown file"
     ),
+    db_path: Optional[str] = typer.Option(
+        None, "--db-path", help="Path to a SQLite database file, for direct DB-state verification (Phase 11)"
+    ),
     model: str = typer.Option(
         DEFAULT_MODEL, "--model", help="Local Ollama model to use (must be `ollama pull`ed already)"
     ),
@@ -74,6 +77,7 @@ def verify(
         repo_path=repo,
         base_url=url,
         requirements_path=requirements,
+        db_path=db_path,
         model_name=model,
     )
 

@@ -6,6 +6,17 @@ docstring) but produces machine-checkable structure for the common phrasings
 a requirements doc actually uses, which is what the Oracle (Phase 6) and the
 Test Scientist (Phase 5) will consume once they exist. A requirement that
 doesn't match any pattern gets `structured=None`, not a guessed structure.
+
+Phase 10 adds `_extract_contract`: two API/integration-contract phrasings
+("must appear in GET X after creation", "must expose Y at GET Z") whose
+target endpoint(s) are named literally in the text, tried as a Kind-
+independent fallback alongside the existing data-invariant fallback.
+
+Phase 11 adds `_extract_db_check`: "Deleted X must be removed from the
+database" -- a data-integrity requirement no amount of calling the
+application's own API can validate, since the point is to catch an API that
+lies about having removed something. Reuses the existing action/object
+endpoint-matching path rather than inventing a new one.
 """
 from __future__ import annotations
 
@@ -41,6 +52,33 @@ _ORDERING_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _STOPWORDS_AFTER_VERB = {"a", "an", "the", "any", "this", "that"}
+
+# Phase 10: API/integration-contract phrasings whose target endpoint(s) are
+# named directly in the requirement text -- unlike the authorization/data-
+# invariant shapes above, these don't need action/object fuzzy matching
+# against discovered endpoints at all, since the method+path is literal.
+_CREATION_VISIBLE_PATTERN = re.compile(
+    r"(?:a\s+new(?:ly)?\s+created\s+)?(?P<object>[\w\s]+?)\s+must\s+appear\s+in\s+"
+    r"(?P<method>GET|POST|PUT|DELETE)\s+(?P<path>\S+?)\s+(?:immediately\s+)?after\s+"
+    r"(?:its\s+|the\s+)?creation\.?$",
+    re.IGNORECASE,
+)
+_ENDPOINT_EXPOSURE_PATTERN = re.compile(
+    r"must\s+expose\s+(?:a\s+|an\s+)?(?P<label>.+?)\s+at\s+"
+    r"(?P<method>GET|POST|PUT|DELETE)\s+(?P<path>\S+?)\.?$",
+    re.IGNORECASE,
+)
+
+# Phase 11: a data-integrity phrasing that can only be checked by comparing
+# the API's story against the database's actual state directly -- unlike
+# every prior shape, no amount of calling the application's own API (even a
+# follow-up GET) can validate this one, since the bug this targets is
+# exactly an API that hides a row without removing it.
+_DB_REMOVAL_PATTERN = re.compile(
+    r"deleted\s+(?P<object>[\w\s]+?)\s+must\s+(?:be\s+)?(?:actually\s+|permanently\s+)?removed\s+from\s+"
+    r"(?:the\s+)?(?:database|storage|db)\b",
+    re.IGNORECASE,
+)
 
 
 def _normalize_verb(verb: str) -> str:
@@ -124,6 +162,53 @@ def _extract_ordering(text: str) -> dict | None:
     }
 
 
+def _extract_contract(text: str) -> dict | None:
+    """Phase 10: "must appear in GET X ... after creation" (a real
+    multi-endpoint contract -- create, then confirm it's visible with
+    matching fields elsewhere) and "must expose Y at GET Z" (a single-
+    endpoint exposure contract). Tried regardless of how the parser
+    classified the sentence (see extract_invariant) since neither phrasing
+    hinges on the requirement's Kind -- the first commonly lands as ORDERING
+    (it contains "after"), the second as FUNCTIONAL (no other kind's hint
+    words apply).
+    """
+    match = _CREATION_VISIBLE_PATTERN.search(text)
+    if match:
+        return {
+            "contract": "creation_visible_in_listing",
+            "object": match.group("object").strip(),
+            "method": match.group("method").upper(),
+            "path": match.group("path").rstrip(".,;:"),
+        }
+    match = _ENDPOINT_EXPOSURE_PATTERN.search(text)
+    if match:
+        return {
+            "contract": "endpoint_exposed",
+            "label": match.group("label").strip(),
+            "method": match.group("method").upper(),
+            "path": match.group("path").rstrip(".,;:"),
+        }
+    return None
+
+
+def _extract_db_check(text: str) -> dict | None:
+    """Phase 11: "Deleted X must be [actually/permanently] removed from the
+    database" -- reuses the existing action/object endpoint-matching path
+    (ACTION_TO_METHOD/object_keyword in world_model/builder.py) by emitting
+    the same "action"/"object" keys the authorization/data-invariant shapes
+    use, plus a "db_check" key the Executor/Oracle dispatch on. Tried as a
+    Kind-independent fallback like _extract_contract above.
+    """
+    match = _DB_REMOVAL_PATTERN.search(text)
+    if match:
+        return {
+            "db_check": "removed_after_delete",
+            "object": match.group("object").strip(),
+            "action": "delete",
+        }
+    return None
+
+
 _EXTRACTORS = {
     RequirementKind.NEGATIVE: _extract_authorization,
     RequirementKind.AUTHORIZATION: _extract_authorization,
@@ -135,9 +220,16 @@ _EXTRACTORS = {
 
 def extract_invariant(requirement: Requirement) -> dict | None:
     extractor = _EXTRACTORS.get(requirement.kind)
-    if extractor is None:
-        return None
-    structured = extractor(requirement.source_text)
+    structured = extractor(requirement.source_text) if extractor else None
+    if structured is None:
+        # Contract phrasings name their own endpoint directly, independent
+        # of Kind -- try before giving up (same reasoning as the
+        # data-invariant fallback below).
+        structured = _extract_contract(requirement.source_text)
+    if structured is None:
+        # Data-integrity phrasing, also Kind-independent (see
+        # _extract_db_check).
+        structured = _extract_db_check(requirement.source_text)
     if structured is None:
         # Some requirements carry more than one signal, e.g. "must return a
         # 404, not a 500" classified NEGATIVE by the parser's keyword scan —

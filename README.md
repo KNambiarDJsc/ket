@@ -4,14 +4,20 @@ Autonomous Software Verification & Testing OS. See `docs/PHASES.md` for the
 full architecture-to-phase mapping and the prior art (Ralph loop, Anthropic
 harness-engineering, EnvHarness, Claude Skills) this design draws from.
 
-This repo currently implements **Phase 0-9** (adds Project persistence/reuse
+This repo currently implements **Phase 0-12** (adds Project persistence/reuse
 across runs, episodic/semantic/procedural Memory, evaluation-gated
-Learning, and two more executable invariant kinds — data-invariant status
-checks and the positive "only X may do this" authorization case; running
-the same `--repo` twice, the second run recognizes a bug the first run
-already confirmed, then executes the *next* candidate and confirms a
-second, independent bug; see `docs/PHASES.md` for details): a real,
-persisted job
+Learning, two more executable invariant kinds — data-invariant status
+checks and the positive "only X may do this" authorization case — two
+API/integration-contract invariant kinds (single-endpoint reachability and
+a real multi-endpoint create-then-list contract with request/response
+schema-consistency checking), a data-integrity invariant kind checked
+by reading a real database directly rather than trusting the application's
+own API, and a Skill System that retrieves versioned procedural knowledge
+(`skills/*/SKILL.md`) relevant to the current goal instead of injecting it
+all into every context; running the same `--repo` twice, the second run
+recognizes a bug the first run already confirmed, then executes the
+*next* candidate and confirms a second, independent bug; see
+`docs/PHASES.md` for details): a real, persisted job
 lifecycle (parse requirements → statically analyze the repo → explore any
 running UI with a real browser → build a world model → rank candidate
 experiments → **execute the top one and produce a verdict** → completion
@@ -44,9 +50,44 @@ the single highest-value experiment out of 6 candidates, and (4) actually
 executes it — creates a project, deletes it as `role=member`, confirms via
 a follow-up GET that it's really gone — and confirms the violation as a
 real `SECURITY_FINDING` with a 4-step observation trail as evidence.
-Everything past that (Triager/Investigator/Reproducer to classify and
-root-cause other kinds of failures, self-healing, skills, evaluation
-lab...) is future phase work — see `docs/PHASES.md` for the tracker.
+Phase 10 adds two more executable invariant kinds — reusing the same
+Executor+Oracle pattern — for requirements whose target endpoint(s) are
+named directly in the requirement text: "the service must expose a health
+check at GET /" (single-endpoint reachability) and "a newly created project
+must appear in GET /projects immediately after creation" (a real
+multi-endpoint contract: create, then confirm both visibility and
+response-schema consistency between the two endpoints). Both already exist
+in `examples/requirements.md` and both genuinely PASS against the example
+app — a deliberately different outcome from the bugs Phases 6/9 found,
+showing the Oracle reports PASS honestly too, not just FAIL.
+
+Phase 11 adds a second bundled app, `examples/example-db-app` (SQLite-
+backed instead of an in-memory dict), with a soft-delete bug: its DELETE
+endpoint only flags a row `deleted` instead of removing it, and its GET
+endpoint filters deleted rows out — so through the API the project
+genuinely looks gone. A follow-up API GET (Phase 6's state check) would
+report PASS; only a direct `SELECT` against the database (a new
+`database.query_sqlite` harness tool) reveals the row is still there,
+confirming a real `APPLICATION_BUG` — the concrete case Database
+Observation exists for: the application's own API cannot be trusted to
+verify its own claims.
+
+Phase 12 adds a Skill System: `skills/*/SKILL.md` files (versioned
+frontmatter + a procedural body) documenting how this project's own
+Executor/Oracle pairs approach each testing category
+(`authorization-testing`, `data-integrity-testing`, `api-contract-testing`
+— literally Phases 6/9, 11, and 10's own approaches, written down). A new
+`SkillRetriever` scores each Skill's description against the current goal
+with the same keyword-overlap signal the Context Compiler already used for
+requirements — only the relevant ones' name+description+version get
+attached to the compiled context bundle (never a full SKILL.md body
+injected regardless of relevance), and every job now writes
+`skills-retrieved.json` as a real, run-indexed trail for a future
+evaluation phase to eventually judge.
+
+Everything past that (a Test Healer/Regression Engine, Environment
+Engineering, evaluation lab...) is future phase work — see
+`docs/PHASES.md` for the tracker.
 
 ## Setup
 
@@ -81,6 +122,27 @@ can delete projects — plus a minimal HTML frontend at `/ui` for the browser
 explorer) and writes artifacts (including screenshots, network captures,
 and the world model) + a persisted job history under `.veriforge/`. Omit
 `--url` to skip browser exploration and only run static analysis.
+
+### Run it against the DB-backed example app (Phase 11)
+
+```bash
+# Terminal 1: start the DB-backed example app (dependency-free, uses sqlite3)
+./.venv/Scripts/python examples/example-db-app/app.py
+
+# Terminal 2: run VeriForge against it, with --db-path so the data-integrity
+# check can actually execute (without it, the requirement stays queued)
+./.venv/Scripts/python -m veriforge.cli.main verify \
+  --repo examples/example-db-app \
+  --requirements examples/db-requirements.md \
+  --url http://localhost:8001 \
+  --db-path examples/example-db-app/data.db \
+  --workdir .
+```
+
+This confirms the planted soft-delete bug: the DELETE endpoint only flags a
+row `deleted` instead of removing it, so a follow-up API GET alone would
+report it gone — only reading the database table directly (via the new
+`database.query_sqlite` harness tool) reveals it's still there.
 
 ## Tests
 

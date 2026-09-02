@@ -258,6 +258,7 @@ class Job(BaseModel):
     repo_path: str | None = None
     base_url: str | None = None
     requirements_path: str | None = None
+    db_path: str | None = None  # Phase 11: SQLite file for direct DB-state verification
     model_name: str = "llama3.2:3b"
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)

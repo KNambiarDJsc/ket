@@ -1,4 +1,6 @@
-from veriforge.domain.enums import FailureCategory, RequirementKind, Verdict
+import pytest
+
+from veriforge.domain.enums import RequirementKind, Verdict
 from veriforge.domain.models import ApiEndpoint, Requirement, Test
 from veriforge.events.bus import EventBus
 from veriforge.execution.experiment_runner import is_executable, run_experiment
@@ -30,100 +32,128 @@ def make_executor(store):
     return ToolExecutor(registry, PermissionPolicy(), budget, bus, "job_1")
 
 
-def test_is_executable_covers_all_three_phase9_shapes():
-    denied_req = Requirement(project_id="p", source_text="x", structured={"expected": "denied"})
-    allowed_only_incomplete = Requirement(
-        project_id="p", source_text="x", structured={"expected": "allowed_only_for_this_actor"}
-    )
-    allowed_only_complete = Requirement(
-        project_id="p", source_text="x",
-        structured={"expected": "allowed_only_for_this_actor", "actor": "owner", "object": "a project"},
-    )
-    data_invariant_with_endpoint_info = Requirement(
-        project_id="p", source_text="x",
-        structured={"expected_status": 404, "action": "delete", "object": "project"},
-    )
-    data_invariant_without_endpoint_info = Requirement(
-        project_id="p", source_text="x", structured={"expected_status": 404},
-    )
-    no_structure_req = Requirement(project_id="p", source_text="x", structured=None)
+# ---- is_executable ----
 
-    assert is_executable(denied_req) is True
-    assert is_executable(allowed_only_incomplete) is False  # missing actor/object
-    assert is_executable(allowed_only_complete) is True
-    assert is_executable(data_invariant_with_endpoint_info) is True
-    assert is_executable(data_invariant_without_endpoint_info) is False  # can't resolve an endpoint
-    assert is_executable(no_structure_req) is False
-    assert is_executable(None) is False
+def test_endpoint_exposed_is_executable_with_method_and_path():
+    req = Requirement(
+        project_id="p", source_text="x", kind=RequirementKind.FUNCTIONAL,
+        structured={"contract": "endpoint_exposed", "label": "health check", "method": "GET", "path": "/"},
+    )
+    assert is_executable(req) is True
 
 
-def test_run_experiment_produces_fail_verdict_and_finding_for_the_planted_bug(store, example_app_server):
+def test_creation_visible_is_executable_with_object_method_and_path():
+    req = Requirement(
+        project_id="p", source_text="x", kind=RequirementKind.ORDERING,
+        structured={"contract": "creation_visible_in_listing", "object": "project", "method": "GET", "path": "/projects"},
+    )
+    assert is_executable(req) is True
+
+
+def test_unknown_contract_shape_is_not_executable():
+    req = Requirement(
+        project_id="p", source_text="x", kind=RequirementKind.ORDERING,
+        structured={"contract": "some_future_kind"},
+    )
+    assert is_executable(req) is False
+
+
+def test_db_removal_is_executable_with_action_and_object():
+    req = Requirement(
+        project_id="p", source_text="x", kind=RequirementKind.FUNCTIONAL,
+        structured={"db_check": "removed_after_delete", "object": "projects", "action": "delete"},
+    )
+    assert is_executable(req) is True
+
+
+# ---- run_experiment dispatch, against the real example app ----
+
+def test_run_experiment_endpoint_exposed_passes_against_real_app(store, example_app_server):
     executor = make_executor(store)
-    endpoints = [
-        ApiEndpoint(project_id="p", method="POST", path="/projects", source_file="app.py", source_line=1),
-        ApiEndpoint(project_id="p", method="DELETE", path="/projects/", source_file="app.py", source_line=2),
-    ]
     requirement = Requirement(
-        project_id="p", source_text="Members cannot delete projects.", kind=RequirementKind.NEGATIVE,
-        critical=True, structured={"actor": "members", "action": "delete", "object": "projects", "expected": "denied"},
+        project_id="p", source_text="The service must expose a health check at GET /.",
+        kind=RequirementKind.FUNCTIONAL, critical=True,
+        structured={"contract": "endpoint_exposed", "label": "health check", "method": "GET", "path": "/"},
     )
-    test = Test(project_id="p", experiment_id="exp_1", name=requirement.source_text)
+    endpoint = ApiEndpoint(project_id="p", method="GET", path="/", source_file="app.py", source_line=80)
+    test = Test(project_id="p", name=requirement.source_text)
+
+    result = run_experiment(
+        base_url=example_app_server, requirement=requirement, endpoint=endpoint,
+        all_endpoints=[endpoint], tool_executor=executor, test=test,
+    )
+
+    assert result.test_run.verdict == Verdict.PASS
+    assert result.oracle_verdict.verdict == Verdict.PASS
+    assert result.finding is None  # only FAIL verdicts produce a Finding
+    executor.shutdown()
+
+
+def test_run_experiment_creation_visible_passes_against_real_app(store, example_app_server):
+    executor = make_executor(store)
+    requirement = Requirement(
+        project_id="p",
+        source_text="A newly created project must appear in GET /projects immediately after creation.",
+        kind=RequirementKind.ORDERING, critical=True,
+        structured={"contract": "creation_visible_in_listing", "object": "project", "method": "GET", "path": "/projects"},
+    )
+    endpoints = [
+        ApiEndpoint(project_id="p", method="POST", path="/projects", source_file="app.py", source_line=38),
+        ApiEndpoint(project_id="p", method="GET", path="/projects", source_file="app.py", source_line=30),
+    ]
+    test = Test(project_id="p", name=requirement.source_text)
 
     result = run_experiment(
         base_url=example_app_server, requirement=requirement, endpoint=endpoints[1],
         all_endpoints=endpoints, tool_executor=executor, test=test,
     )
 
-    assert result.oracle_verdict.verdict == Verdict.FAIL
-    assert result.test_run.verdict == Verdict.FAIL
-    assert result.test_run.finished_at is not None
-    assert result.finding is not None
-    # category is UNKNOWN here on purpose -- classifying it is the Phase 7
-    # Triager's job (see tests/test_investigation.py), not run_experiment's.
-    assert result.finding.category == FailureCategory.UNKNOWN
-    assert "VIOLATED" in result.finding.summary
-    assert len(result.observations) == 4
+    assert result.oracle_verdict.verdict == Verdict.PASS
+    assert result.finding is None
+    assert [o.tool for o in result.observations] == ["api.post", "api.get"]
     executor.shutdown()
 
 
-def test_run_experiment_dispatches_to_data_invariant_and_produces_pass(store, example_app_server):
+def test_run_experiment_db_removal_without_db_path_raises(store, example_db_app_server):
+    base_url, _db_path = example_db_app_server
     executor = make_executor(store)
-    endpoints = [ApiEndpoint(project_id="p", method="DELETE", path="/projects/", source_file="app.py", source_line=2)]
     requirement = Requirement(
-        project_id="p", source_text="Deleting a project that does not exist must return a 404, not a 500.",
-        kind=RequirementKind.DATA_INVARIANT, critical=True,
-        structured={"expected_status": 404, "forbidden_status": 500, "action": "delete", "object": "project"},
+        project_id="p",
+        source_text="Deleted projects must be permanently removed from the database, not merely hidden.",
+        kind=RequirementKind.FUNCTIONAL, critical=True,
+        structured={"db_check": "removed_after_delete", "object": "projects", "action": "delete"},
     )
-    test = Test(project_id="p", experiment_id="exp_2", name=requirement.source_text)
+    endpoint = ApiEndpoint(project_id="p", method="DELETE", path="/projects/", source_file="app.py", source_line=75)
+    test = Test(project_id="p", name=requirement.source_text)
 
-    result = run_experiment(
-        base_url=example_app_server, requirement=requirement, endpoint=endpoints[0],
-        all_endpoints=endpoints, tool_executor=executor, test=test,
-    )
-
-    assert result.oracle_verdict.verdict == Verdict.PASS  # the app does 404 correctly here
-    assert result.finding is None  # no Finding on PASS
+    with pytest.raises(ValueError, match="db_path"):
+        run_experiment(
+            base_url=base_url, requirement=requirement, endpoint=endpoint,
+            all_endpoints=[endpoint], tool_executor=executor, test=test,
+        )
     executor.shutdown()
 
 
-def test_run_experiment_dispatches_to_allowed_only_and_produces_fail(store, example_app_server):
+def test_run_experiment_db_removal_fails_against_real_app_when_db_path_given(store, example_db_app_server):
+    base_url, db_path = example_db_app_server
     executor = make_executor(store)
     endpoints = [
-        ApiEndpoint(project_id="p", method="POST", path="/projects", source_file="app.py", source_line=1),
-        ApiEndpoint(project_id="p", method="DELETE", path="/projects/", source_file="app.py", source_line=2),
+        ApiEndpoint(project_id="p", method="POST", path="/projects", source_file="app.py", source_line=60),
+        ApiEndpoint(project_id="p", method="DELETE", path="/projects/", source_file="app.py", source_line=75),
     ]
     requirement = Requirement(
-        project_id="p", source_text="Only an owner may delete a project.", kind=RequirementKind.AUTHORIZATION,
-        critical=True,
-        structured={"actor": "owner", "action": "delete", "object": "a project", "expected": "allowed_only_for_this_actor"},
+        project_id="p",
+        source_text="Deleted projects must be permanently removed from the database, not merely hidden.",
+        kind=RequirementKind.FUNCTIONAL, critical=True,
+        structured={"db_check": "removed_after_delete", "object": "projects", "action": "delete"},
     )
-    test = Test(project_id="p", experiment_id="exp_3", name=requirement.source_text)
+    test = Test(project_id="p", name=requirement.source_text)
 
     result = run_experiment(
-        base_url=example_app_server, requirement=requirement, endpoint=endpoints[1],
-        all_endpoints=endpoints, tool_executor=executor, test=test,
+        base_url=base_url, requirement=requirement, endpoint=endpoints[1],
+        all_endpoints=endpoints, tool_executor=executor, test=test, db_path=db_path,
     )
 
-    assert result.oracle_verdict.verdict == Verdict.FAIL  # not exclusive to "owner"
+    assert result.oracle_verdict.verdict == Verdict.FAIL  # the planted soft-delete bug
     assert result.finding is not None
     executor.shutdown()

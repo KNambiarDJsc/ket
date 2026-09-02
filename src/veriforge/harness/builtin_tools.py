@@ -12,6 +12,7 @@ import httpx
 from veriforge.cartography.cartographer import analyze as analyze_repository_facts
 from veriforge.cartography.filesystem import scan_repository
 from veriforge.domain.enums import RiskLevel
+from veriforge.execution.db_executor import run_read_only_query
 from veriforge.explorer.browser import BrowserExplorer
 from veriforge.harness.tools import RetryPolicy, ToolRegistry, ToolSpec
 from veriforge.llm.provider import LLMProvider
@@ -102,6 +103,25 @@ def register_builtin_tools(registry: ToolRegistry, llm: LLMProvider) -> None:
         handler=lambda url, screenshot_dir=None, max_clicks=3: BrowserExplorer().explore(
             url, max_clicks=max_clicks, screenshot_dir=screenshot_dir
         ),
+    )
+
+    # Phase 11: the one database primitive this project exposes. READ risk is
+    # justified the same way api.get is: run_read_only_query refuses anything
+    # but a SELECT (enforced inside the function, not just by convention), so
+    # this can only ever observe state, never mutate it -- unlike a
+    # hypothetical database.execute that could run arbitrary SQL, which would
+    # warrant HIGH_RISK/DESTRUCTIVE like the spec's own database.DELETE example.
+    registry.register(
+        ToolSpec(
+            name="database.query_sqlite",
+            description=(
+                "Run a read-only SELECT against a SQLite database file, for direct state "
+                "verification that bypasses the application's own API."
+            ),
+            risk=RiskLevel.READ,
+            timeout_seconds=10.0,
+        ),
+        handler=lambda db_path, query, params=None: run_read_only_query(db_path, query, params),
     )
 
     registry.register(

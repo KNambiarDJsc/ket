@@ -53,10 +53,10 @@ def test_full_job_lifecycle_reaches_completed(store, tmp_path):
     assert summary.test_count == 0  # honest: no Executor/Oracle yet
     assert summary.hypotheses_generated >= 1  # Test Scientist ranked real candidates
     assert summary.top_hypothesis is not None
-    # requirements/init/analysis/world-model/context-bundle/learning/hypotheses
-    # (run-summary.json is written after this list is computed, since it
-    # can't include itself)
-    assert len(summary.artifact_paths) == 7
+    # requirements/init/analysis/world-model/context-bundle/skills-retrieved/
+    # learning/hypotheses (run-summary.json is written after this list is
+    # computed, since it can't include itself)
+    assert len(summary.artifact_paths) == 8
     assert summary.strategy_version == 1
     assert summary.learning_kept is None  # insufficient prior runs to judge yet
     assert summary.tool_calls_used >= 2  # filesystem.scan_repository + llm.generate
@@ -64,6 +64,14 @@ def test_full_job_lifecycle_reaches_completed(store, tmp_path):
 
     for path in summary.artifact_paths:
         assert Path(path).exists()
+
+    # Phase 12: the real bundled skills/*/SKILL.md are discoverable and
+    # actually retrieved for this job's real goal string -- not just
+    # structurally wired but exercised end-to-end.
+    import json as _json
+    skills_artifact_path = next(p for p in summary.artifact_paths if p.endswith("skills-retrieved.json"))
+    skills_retrieved = _json.loads(Path(skills_artifact_path).read_text(encoding="utf-8"))
+    assert skills_retrieved["retrieved"], "expected at least one bundled Skill to match the real job goal"
 
     experiments = store.experiments.list_by_job(job.id)
     tests = store.tests.list_by_job(job.id)

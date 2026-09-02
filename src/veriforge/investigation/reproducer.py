@@ -28,6 +28,7 @@ def reproduce(
     tool_executor: ToolExecutor,
     test: Test,
     first_verdict: Verdict,
+    db_path: str | None = None,
 ) -> ReproductionResult:
     second_run = run_experiment(
         base_url=base_url,
@@ -36,6 +37,7 @@ def reproduce(
         all_endpoints=all_endpoints,
         tool_executor=tool_executor,
         test=test,
+        db_path=db_path,
     )
     return ReproductionResult(
         reproducible=(second_run.oracle_verdict.verdict == first_verdict),

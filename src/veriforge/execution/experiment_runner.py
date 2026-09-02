@@ -5,10 +5,18 @@ updated Test status, optional Finding). Spec §6/§17/§18.
 
 Phase 6 supported exactly one invariant kind (expected=="denied"). Phase 9
 adds two more: expected=="allowed_only_for_this_actor" (the positive
-counterpart) and data invariants (expected_status/forbidden_status).
+counterpart) and data invariants (expected_status/forbidden_status). Phase
+10 adds two API/integration-contract kinds keyed by `structured["contract"]`:
+"endpoint_exposed" (single-endpoint reachability) and
+"creation_visible_in_listing" (a real multi-endpoint contract: create, then
+confirm visibility *and* response-schema consistency elsewhere). Phase 11
+adds `structured["db_check"]=="removed_after_delete"`: a direct database
+read, not another API call -- the one shape that needs an optional
+`db_path` threaded through (only a job that was given `--db-path` can ever
+execute it; see job_runner._execute_top_experiment's gate).
 `is_executable`/`run_experiment` dispatch on `requirement.structured` to
 pick the right Executor+Oracle pair; anything that doesn't match one of
-these three shapes stays unexecuted (HYPOTHESIS/PLANNED), honestly, rather
+these six shapes stays unexecuted (HYPOTHESIS/PLANNED), honestly, rather
 than guessing.
 """
 from __future__ import annotations
@@ -17,17 +25,23 @@ from dataclasses import dataclass
 
 from veriforge.domain.enums import FailureCategory, Verdict
 from veriforge.domain.models import ApiEndpoint, Finding, Observation, Requirement, Test, TestRun, utcnow
+from veriforge.execution.db_executor import execute_db_removal_check
 from veriforge.execution.http_executor import (
     execute_allowed_only_for_actor_check,
     execute_authorization_check,
+    execute_creation_visibility_check,
     execute_data_invariant_check,
+    execute_endpoint_exposure_check,
 )
 from veriforge.harness.executor import ToolExecutor
 from veriforge.oracle.oracle import (
     OracleVerdict,
     judge_allowed_only_for_actor,
     judge_authorization,
+    judge_creation_visibility,
     judge_data_invariant,
+    judge_db_removal,
+    judge_endpoint_exposure,
 )
 
 
@@ -52,6 +66,13 @@ def is_executable(requirement: Requirement | None) -> bool:
         # A data-invariant check still needs a resolvable endpoint, which
         # needs action/object -- match_endpoint_for_requirement enforces
         # that separately; here we only gate on the invariant shape itself.
+        return "action" in structured and "object" in structured
+    contract = structured.get("contract")
+    if contract == "endpoint_exposed":
+        return "method" in structured and "path" in structured
+    if contract == "creation_visible_in_listing":
+        return "object" in structured and "method" in structured and "path" in structured
+    if structured.get("db_check") == "removed_after_delete":
         return "action" in structured and "object" in structured
     return False
 
@@ -80,6 +101,7 @@ def run_experiment(
     all_endpoints: list[ApiEndpoint],
     tool_executor: ToolExecutor,
     test: Test,
+    db_path: str | None = None,
 ) -> ExperimentRunResult:
     structured = requirement.structured
     expected = structured.get("expected")
@@ -117,6 +139,37 @@ def run_experiment(
             forbidden_status=structured.get("forbidden_status"),
             response_status=result.response_status,
         )
+        observations = result.observations
+
+    elif structured.get("contract") == "endpoint_exposed":
+        result = execute_endpoint_exposure_check(
+            base_url=base_url, action_endpoint=endpoint,
+            tool_executor=tool_executor, test_run_id=test_run.id,
+        )
+        verdict = judge_endpoint_exposure(
+            expected_method=structured["method"], expected_path=structured["path"],
+            response_status=result.response_status,
+        )
+        observations = result.observations
+
+    elif structured.get("contract") == "creation_visible_in_listing":
+        result = execute_creation_visibility_check(
+            base_url=base_url, structured=structured, all_endpoints=all_endpoints,
+            listing_endpoint=endpoint, tool_executor=tool_executor, test_run_id=test_run.id,
+        )
+        verdict = judge_creation_visibility(
+            listing_entry=result.listing_entry, schema_mismatches=result.schema_mismatches,
+        )
+        observations = result.observations
+
+    elif structured.get("db_check") == "removed_after_delete":
+        if db_path is None:
+            raise ValueError("db_check requirement requires a db_path but none was provided")
+        result = execute_db_removal_check(
+            base_url=base_url, db_path=db_path, requirement=requirement, action_endpoint=endpoint,
+            all_endpoints=all_endpoints, tool_executor=tool_executor, test_run_id=test_run.id,
+        )
+        verdict = judge_db_removal(row_still_in_db=result.row_still_in_db)
         observations = result.observations
 
     else:

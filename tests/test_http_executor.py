@@ -4,7 +4,9 @@ from veriforge.events.bus import EventBus
 from veriforge.execution.http_executor import (
     execute_allowed_only_for_actor_check,
     execute_authorization_check,
+    execute_creation_visibility_check,
     execute_data_invariant_check,
+    execute_endpoint_exposure_check,
     find_creation_endpoint,
     origin_of,
 )
@@ -148,4 +150,62 @@ def test_execute_allowed_only_for_actor_check_reveals_no_exclusivity(store, exam
     actor_action = next(o for o in result.observations if "role='owner'" in o.action and o.tool == "api.delete")
     other_action = next(o for o in result.observations if "role='not-owner'" in o.action and o.tool == "api.delete")
     assert actor_action is not None and other_action is not None
+    executor.shutdown()
+
+
+# ---- Phase 10: endpoint-exposure and creation-visibility contracts ----
+
+def test_execute_endpoint_exposure_check_against_real_example_app(store, example_app_server):
+    executor = make_executor(store)
+    health_endpoint = ApiEndpoint(project_id="p", method="GET", path="/", source_file="app.py", source_line=80)
+
+    result = execute_endpoint_exposure_check(
+        base_url=example_app_server, action_endpoint=health_endpoint,
+        tool_executor=executor, test_run_id="run_1",
+    )
+
+    assert result.response_status == 200
+    assert len(result.observations) == 1
+    assert "endpoint-exposure contract check" in result.observations[0].action
+    executor.shutdown()
+
+
+def test_execute_creation_visibility_check_against_real_example_app(store, example_app_server):
+    # The example app is synchronous and single-process, so a project created
+    # via POST really is visible in the very next GET -- a genuine PASS,
+    # confirming the Oracle doesn't just manufacture bugs to look useful.
+    executor = make_executor(store)
+    endpoints = [
+        ApiEndpoint(project_id="p", method="POST", path="/projects", source_file="app.py", source_line=38),
+        ApiEndpoint(project_id="p", method="GET", path="/projects", source_file="app.py", source_line=30),
+    ]
+    structured = {"contract": "creation_visible_in_listing", "object": "project", "method": "GET", "path": "/projects"}
+
+    result = execute_creation_visibility_check(
+        base_url=example_app_server, structured=structured, all_endpoints=endpoints,
+        listing_endpoint=endpoints[1], tool_executor=executor, test_run_id="run_1",
+    )
+
+    assert result.created_body is not None
+    assert result.listing_entry is not None
+    assert result.listing_entry["id"] == result.created_body["id"]
+    assert result.schema_mismatches == []
+    assert [o.tool for o in result.observations] == ["api.post", "api.get"]
+    executor.shutdown()
+
+
+def test_execute_creation_visibility_check_fails_without_a_creation_endpoint(store, example_app_server):
+    executor = make_executor(store)
+    listing_endpoint = ApiEndpoint(project_id="p", method="GET", path="/projects", source_file="app.py", source_line=30)
+    structured = {"contract": "creation_visible_in_listing", "object": "project", "method": "GET", "path": "/projects"}
+
+    result = execute_creation_visibility_check(
+        base_url=example_app_server, structured=structured, all_endpoints=[],
+        listing_endpoint=listing_endpoint, tool_executor=executor, test_run_id="run_1",
+    )
+
+    assert result.created_body is None
+    assert result.listing_entry is None
+    assert result.schema_mismatches == ["no POST creation endpoint could be resolved for this object"]
+    assert result.observations == []
     executor.shutdown()
