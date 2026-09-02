@@ -106,8 +106,14 @@ class Handler(BaseHTTPRequestHandler):
 
 def main(port: int = 8001) -> None:
     init_db()
-    server = HTTPServer(("localhost", port), Handler)
-    print(f"veriforge example-db-app listening on http://localhost:{port} (db: {DB_PATH})")
+    # 0.0.0.0, not "localhost": this is the entry point Docker's CMD runs
+    # (Phase 14) as well as direct `python app.py`. A server bound only to
+    # a container's own loopback is unreachable through Docker's -p port
+    # publishing -- a well-documented Docker networking gotcha, not a
+    # Docker bug. The test fixtures construct HTTPServer directly (bound to
+    # "localhost") and never call main(), so this doesn't affect them.
+    server = HTTPServer(("0.0.0.0", port), Handler)
+    print(f"veriforge example-db-app listening on http://0.0.0.0:{port} (db: {DB_PATH})")
     server.serve_forever()
 
 

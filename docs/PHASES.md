@@ -56,7 +56,7 @@ explicitly deferred.
 | 11 | **Database Observation**: a real DB-backed example app + DB state-comparison oracle (Level 3 today only checks via a follow-up GET; needs a real adapter for SQL/NoSQL state checks). Covers Core: data integrity | ✅ (SQLite adapter + one executable data-integrity check; NoSQL and broader state comparisons deferred — see notes) |
 | 12 | **Skill System**: `skills/*/SKILL.md` as versioned, evaluable procedural knowledge; a retriever the Context Compiler calls, not a blob injected into every context | ✅ (retriever + Context Compiler integration + 3 real skills documenting Phases 6/10/11's own testing approaches; evaluation itself deferred to Phase 16) |
 | 13 | **Test Healer** (selector/timing/locator fixes only, never weakens an assertion — every heal produces a diff) **+ Regression Engine, including regression-test generation**: a `BUG_VERIFIED` Finding gets a permanent, executable regression test file written to the project's own test suite (not just a `Test` row) — application source is never touched; re-run only the requirements/tests the World Model says a diff actually affects | ✅ (opt-in via `--write-regressions`; also closes Phase 5's change_relevance placeholder and Phase 8's stale-memory gap with a real git-diff signal — see notes) |
-| 14 | **Environment Engineering**: Docker-based isolated environments, seed data/users, fault injection (latency, timeout, service failure, duplicate event, stale state). Unlocks Advanced: concurrency, failure/recovery, chaos | not started |
+| 14 | **Environment Engineering**: Docker-based isolated environments, seed data/users, fault injection (latency, timeout, service failure, duplicate event, stale state). Unlocks Advanced: concurrency, failure/recovery, chaos | ✅ (three standalone modules against a real Docker daemon/real HTTP proxy; JobRunner/CLI wiring deferred — see notes) |
 | 15 | **Security + Concurrency** hypothesis engine: cross-account access, privilege escalation, object enumeration, race conditions/duplicate actions — needs Phase 14's multi-identity/fault-injection environment to be real rather than single-case | not started |
 | 16 | **Evaluation Lab + Harness Auditor**: multiple benchmark apps with known, seeded bugs; tracks the metrics in §42 (verified findings/compute, information gain/experiment, false-positive rate); harness/strategy changes must clear this bar before being kept — this is what makes Phase 8's "keep/revert" gate statistically meaningful instead of n=1 | not started |
 | 17 | **Source connectors + durable multi-run architecture**: GitHub (App) as one `SourceProvider` implementation (never the core abstraction), immutable-commit resolution, isolated per-run workspace, Project-vs-Run state separation, crash-resume via existing checkpoint primitives (`LoopState`/`BudgetTracker`) hardened and actually tested against a mid-run kill | not started |
@@ -814,6 +814,145 @@ file with a real `pytest` subprocess against the same live server produces
 `1 failed` with the reasoning text `"...still physically present..."` in
 its output — proof the generated test is genuinely executable and
 semantically correct, not merely syntactically valid.
+
+## Phase 14 implementation notes
+
+Three standalone, independently-testable modules under `src/veriforge/
+environment/` — deliberately not wired into `JobRunner`/the CLI yet. This
+phase's stated purpose is "unlocks Advanced: concurrency, failure/recovery,
+chaos" (Phase 15+); those phases are what will actually call these modules
+from within a job run, with a real need that shapes the integration. Wiring
+them in now, ungated by that need, would mean guessing at the integration
+shape — the same "don't build past what's demonstrated" discipline every
+prior phase's deferrals have followed.
+
+- **`environment/docker_env.py` — `ManagedDockerEnvironment`**: build (or
+  reuse) an image, run it, wait for real HTTP readiness, guarantee teardown
+  on `__exit__` (including when the `with` block raises) via `docker rm -f`.
+  `docker_available()` is the honest-degradation check every caller should
+  use before attempting this at all — mirrors the local-first Ollama
+  pattern exactly (`test_docker_env.py`'s whole suite is `skipif(not
+  docker_available())`, the same shape as `test_ollama_provider.py`'s live
+  smoke test).
+  - Shells out to the `docker` CLI via `subprocess`, not a Python SDK
+    dependency — same reasoning as `regression/change_impact.py` shelling
+    out to `git`.
+  - **A real Docker networking bug found and fixed while building this**:
+    `examples/example-db-app/app.py`'s `main()` bound its server to
+    `"localhost"` — invisible through Docker's `-p` port publishing, a
+    well-documented gotcha (a container's own loopback interface isn't the
+    same as the host-reachable interface `-p` maps to). Confirmed via
+    `docker exec` that a request *from inside* the container succeeded
+    while every request *from outside* got a dropped connection. Fixed by
+    binding to `0.0.0.0` in `main()` specifically — the entry point Docker's
+    `CMD` actually runs — while every test fixture that constructs
+    `HTTPServer` directly (bound to `"localhost"`) was confirmed unaffected.
+  - **A real Windows PATH bug found and fixed**: `shutil.which("docker")`
+    returns `None` from a Python subprocess on this machine even though an
+    interactive shell resolves `docker` fine — the Docker Desktop installer
+    updates a PATH an already-running shell's child processes don't
+    consistently inherit. `_docker_executable()` falls back to the
+    well-known Windows install path when `shutil.which` comes up empty,
+    still failing an eventual `docker ...` call honestly if that guess is
+    also wrong rather than pretending the exec succeeded.
+  - **Timeouts are generous on purpose, not arbitrary**: a fresh subprocess
+    call against Docker Desktop's VM-backed engine measurably took 1-70+
+    seconds for the *same* command (`docker info`, `docker rm -f`) at
+    different points in this session, depending on how loaded the daemon
+    already was from other, unrelated running containers on this dev
+    machine. `docker_available()`/`stop_container()` treat "slow" and
+    "unreachable" as genuinely different signals — a caller deciding
+    whether Docker is usable at all needs the honest one.
+- **`environment/fault_proxy.py` — `FaultInjectingProxy`**: a real
+  single-threaded HTTP reverse proxy in front of a live backend, injecting
+  five independently-configurable fault types per request path — latency,
+  timeout (answers eventually, past a client's own timeout, rather than
+  hanging forever), deterministic failure-rate (every Nth request, not a
+  coin flip, so a test can assert an exact count), duplicate delivery
+  (forwards twice, discards the first response), and stale-response replay
+  (caches the first successful response per path, keeps serving it after
+  the backend's real state has moved on). Single-threaded deliberately:
+  this phase's fault scenarios are about sequencing, not concurrent-request
+  races — that's Phase 15's job, with its own environment needs.
+  - **A real Windows timing bug found and fixed**: `test_no_latency_fault_
+    is_fast` measured 4.7s instead of the expected <0.25s. Diagnosed with a
+    standalone scratch script proving even a bare `httpx.get("http://
+    localhost:...")` (no proxy involved) cost 2-3s while the backend itself
+    reported handling the request in under a millisecond — Windows'
+    `"localhost"` resolution trying IPv6 first, falling back to IPv4 after
+    a multi-second delay. Fixed by having the proxy bind to `"127.0.0.1"`
+    explicitly rather than `"localhost"`, and normalizing the test file's
+    own backend URL the same way. Dropped the full suite's runtime from
+    133s to 34s. Environmental, not a fault-injection logic bug.
+- **`environment/seed.py` — `seed_environment()`**: populates a fresh
+  environment with named actors and resources via the application's own API
+  (reusing the harness's existing `api.post` tool) before tests run — never
+  inserted directly into a database, since seeding through the real API is
+  itself a first exercise of that API's creation path. Every Executor since
+  Phase 6 created one throwaway resource per experiment and discarded it;
+  Advanced testing (Phase 15's concurrency/security engine especially) needs
+  real, pre-existing, multi-actor state to act on — "can actor B see a
+  resource actor A already owns" has no answer if nothing exists yet.
+- **`examples/example-db-app/Dockerfile`** — containerizes the existing
+  Phase 11 example app (`python:3.11-slim`, stdlib-only, no dependencies to
+  install) so the Docker environment tests exercise a real target rather
+  than a synthetic stand-in.
+- **A second real bug found and fixed while verifying, in the test suite
+  itself**: `tests/test_docker_env.py`'s own `_container_is_running()`
+  helper called bare `subprocess.run(["docker", ...])` instead of routing
+  through `_docker_executable()` like every other call in this phase — it
+  would have hit the exact PATH bug above the first time a test actually
+  reached that assertion. Fixed before it could produce a false "Docker
+  unavailable" skip or a raw `FileNotFoundError` instead of a real test
+  result.
+- **A third real bug found by watching the daemon after real runs, not by
+  reading the code**: `ManagedDockerEnvironment.__exit__` only ever called
+  `stop_container` — the image it built (`image_tag=None`, the default)
+  was never removed, so every test run left a uniquely-tagged, never-
+  cleaned-up image behind. Confirmed directly: 11 `veriforge-env-*` images
+  had accumulated on this machine purely from this session's own test
+  runs. Fixed with `remove_image()` (the same best-effort, never-raise
+  shape as `stop_container`), called from both `__exit__` and `__enter__`'s
+  own failure path — but only when `self._built_here` is true, since an
+  explicitly-passed `image_tag` is the caller's image to manage, not this
+  module's to delete out from under them.
+
+**Verified live against the real Docker daemon on this machine**: `docker
+build` + `docker run` + `docker port` + polling the container's real HTTP
+`/` endpoint until ready, then confirming a fresh container has no
+leftover `data.db` from a prior run (`GET /projects` returns `[]`), that
+two independently-managed environments never see each other's state, and
+that teardown (`docker rm -f`, container gone from `docker ps`, image gone
+from `docker images`) happens even when the `with` block raises — checked
+directly against `docker ps -a`/`docker images` after the run, not just
+inferred from the test passing. `test_fault_proxy.py`'s 8 tests
+(forwarding, all 5 fault types, and the "no fault configured stays fast"
+control) and `test_seed.py`'s 2 tests all pass hermetically, no real Docker
+needed. All 13 Phase 14 tests pass together in one run. Full project
+suite with Docker live: **203 passed**, 2 deselected (pre-existing
+environment-flaky exclusions unrelated to this phase) — the 3 Docker tests
+that skip when the daemon is unreachable (a real, honest environmental
+skip, same shape as `test_ollama_provider.py`'s) genuinely ran and passed
+this time.
+
+**A real, unrelated infrastructure incident during this verification,
+worth recording honestly**: this dev machine's Docker Desktop was already
+running ~15 real containers for other, unrelated projects when this
+phase's tests started. Test-driven load on top of that contention caused
+the daemon to crash mid-session, taking those other containers down with
+it — surfaced immediately rather than silently retried, and the user
+restarted Docker Desktop themselves before verification resumed. Not a
+defect in this phase's code; recorded here because it's the kind of real
+operational signal `docker_available()`'s honest-degradation design exists
+to survive, not paper over.
+
+**Deferred, explicitly.** JobRunner/CLI integration (a `--docker-context`
+job flag, a seed spec file format, fault config threaded through a job
+run) waits for Phase 15 to have a real concurrency/security scenario that
+actually needs it — building that wiring now would mean inventing the
+integration shape rather than deriving it from a real caller, the same
+discipline Phase 10 used to defer service-to-service workflows until a
+real second service existed to test against.
 
 ## Local-first model policy
 

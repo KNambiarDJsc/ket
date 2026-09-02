@@ -4,7 +4,7 @@ Autonomous Software Verification & Testing OS. See `docs/PHASES.md` for the
 full architecture-to-phase mapping and the prior art (Ralph loop, Anthropic
 harness-engineering, EnvHarness, Claude Skills) this design draws from.
 
-This repo currently implements **Phase 0-13** (adds Project persistence/reuse
+This repo currently implements **Phase 0-14** (adds Project persistence/reuse
 across runs, episodic/semantic/procedural Memory, evaluation-gated
 Learning, two more executable invariant kinds — data-invariant status
 checks and the positive "only X may do this" authorization case — two
@@ -101,9 +101,23 @@ subprocess. Re-running it later, the Test Healer patches the file's
 embedded endpoint/base_url if they've drifted, always producing a diff and
 refusing outright if the patch would touch the assertion itself.
 
-Everything past that (Environment Engineering, Security/Concurrency,
-evaluation lab...) is future phase work — see
-`docs/PHASES.md` for the tracker.
+Phase 14 adds Environment Engineering: `ManagedDockerEnvironment` (build/run/
+wait-for-ready/guaranteed-teardown against a real `docker` CLI, degrading
+honestly via `docker_available()` when Docker isn't running, exactly like
+the local-first Ollama pattern), a `FaultInjectingProxy` (a real HTTP
+reverse proxy injecting latency, timeout, deterministic failure-rate,
+duplicate delivery, and stale-response replay against a live backend), and
+`seed_environment()` (populates a fresh environment with named actors and
+resources through the application's own API, not a direct DB insert). All
+three are standalone modules, verified independently (a real container
+built and run from `examples/example-db-app`'s new `Dockerfile`, all five
+fault types measured against a real backend, seeding verified against a
+real running app) rather than wired into the CLI yet — that integration
+waits for Phase 15's concurrency/security engine to have a real scenario
+that needs it.
+
+Everything past that (Security/Concurrency, evaluation lab...) is future
+phase work — see `docs/PHASES.md` for the tracker.
 
 ## Setup
 
@@ -173,7 +187,9 @@ you don't want the generated file showing up in `git status`.
 ```
 
 One test (`test_live_ollama_smoke`) exercises the real local Ollama backend
-and skips gracefully if Ollama isn't running — everything else is hermetic.
+and `tests/test_docker_env.py`'s three tests exercise a real Docker daemon
+(building and running an actual container) — both skip gracefully if that
+backend isn't reachable. Everything else is hermetic.
 
 ## Local-first model policy
 
