@@ -5,6 +5,7 @@ from veriforge.oracle.oracle import (
     judge_creation_visibility,
     judge_data_invariant,
     judge_db_removal,
+    judge_duplicate_creation,
     judge_endpoint_exposure,
 )
 
@@ -138,3 +139,22 @@ def test_db_removal_fails_when_row_still_present():
 def test_db_removal_passes_when_row_actually_gone():
     verdict = judge_db_removal(row_still_in_db=False)
     assert verdict.verdict == Verdict.PASS
+
+
+# ---- judge_duplicate_creation (Phase 15) ----
+
+def test_duplicate_creation_passes_when_exactly_one_row_created():
+    verdict = judge_duplicate_creation(row_count_delta=1)
+    assert verdict.verdict == Verdict.PASS
+    assert verdict.confidence >= 0.85
+
+
+def test_duplicate_creation_fails_when_two_rows_created():
+    verdict = judge_duplicate_creation(row_count_delta=2)
+    assert verdict.verdict == Verdict.FAIL
+    assert "no idempotency protection" in verdict.reasoning
+
+
+def test_duplicate_creation_uncertain_when_no_row_created():
+    verdict = judge_duplicate_creation(row_count_delta=0)
+    assert verdict.verdict == Verdict.UNCERTAIN

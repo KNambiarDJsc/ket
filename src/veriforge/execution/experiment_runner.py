@@ -13,10 +13,14 @@ confirm visibility *and* response-schema consistency elsewhere). Phase 11
 adds `structured["db_check"]=="removed_after_delete"`: a direct database
 read, not another API call -- the one shape that needs an optional
 `db_path` threaded through (only a job that was given `--db-path` can ever
-execute it; see job_runner._execute_top_experiment's gate).
+execute it; see job_runner._execute_top_experiment's gate). Phase 15 adds
+`structured["concurrency_check"]=="no_duplicate_on_creation_replay"`:
+composes Phase 14's FaultInjectingProxy (duplicate delivery) with Phase 11's
+direct-DB read (row count) -- also gated on `db_path` like the db_check
+shape.
 `is_executable`/`run_experiment` dispatch on `requirement.structured` to
 pick the right Executor+Oracle pair; anything that doesn't match one of
-these six shapes stays unexecuted (HYPOTHESIS/PLANNED), honestly, rather
+these seven shapes stays unexecuted (HYPOTHESIS/PLANNED), honestly, rather
 than guessing.
 """
 from __future__ import annotations
@@ -25,6 +29,7 @@ from dataclasses import dataclass
 
 from veriforge.domain.enums import FailureCategory, Verdict
 from veriforge.domain.models import ApiEndpoint, Finding, Observation, Requirement, Test, TestRun, utcnow
+from veriforge.execution.concurrency_executor import execute_duplicate_creation_check
 from veriforge.execution.db_executor import execute_db_removal_check
 from veriforge.execution.http_executor import (
     execute_allowed_only_for_actor_check,
@@ -41,6 +46,7 @@ from veriforge.oracle.oracle import (
     judge_creation_visibility,
     judge_data_invariant,
     judge_db_removal,
+    judge_duplicate_creation,
     judge_endpoint_exposure,
 )
 
@@ -73,6 +79,8 @@ def is_executable(requirement: Requirement | None) -> bool:
     if contract == "creation_visible_in_listing":
         return "object" in structured and "method" in structured and "path" in structured
     if structured.get("db_check") == "removed_after_delete":
+        return "action" in structured and "object" in structured
+    if structured.get("concurrency_check") == "no_duplicate_on_creation_replay":
         return "action" in structured and "object" in structured
     return False
 
@@ -170,6 +178,16 @@ def run_experiment(
             all_endpoints=all_endpoints, tool_executor=tool_executor, test_run_id=test_run.id,
         )
         verdict = judge_db_removal(row_still_in_db=result.row_still_in_db)
+        observations = result.observations
+
+    elif structured.get("concurrency_check") == "no_duplicate_on_creation_replay":
+        if db_path is None:
+            raise ValueError("concurrency_check requirement requires a db_path but none was provided")
+        result = execute_duplicate_creation_check(
+            base_url=base_url, db_path=db_path, requirement=requirement, action_endpoint=endpoint,
+            tool_executor=tool_executor, test_run_id=test_run.id,
+        )
+        verdict = judge_duplicate_creation(row_count_delta=result.row_count_delta)
         observations = result.observations
 
     else:

@@ -114,3 +114,29 @@ def test_negative_falls_back_to_status_codes_when_no_actor_pattern():
         "expected_status": 404, "forbidden_status": 500,
         "action": "delete", "object": "project",
     }
+
+
+# ---- Phase 15: request-duplication/concurrency extraction ----
+
+def test_duplicate_creation_extracted():
+    structured = extract_invariant(
+        req("A duplicated project-creation request must not create two projects.", RequirementKind.NEGATIVE)
+    )
+    assert structured == {
+        "concurrency_check": "no_duplicate_on_creation_replay",
+        "object": "projects",
+        "action": "create",
+    }
+
+
+def test_duplicate_creation_pattern_takes_priority_over_generic_negative_pattern():
+    # The parser classifies this NEGATIVE (it contains "must not"), and the
+    # generic actor/action/object NEGATIVE pattern would otherwise also match
+    # it -- wrongly, treating "a duplicated project-creation request" as an
+    # actor. The concurrency-check pattern must win.
+    structured = extract_invariant(
+        req("A duplicated project-creation request must not create two projects.", RequirementKind.NEGATIVE)
+    )
+    assert structured.get("concurrency_check") == "no_duplicate_on_creation_replay"
+    assert "actor" not in structured
+    assert structured.get("expected") != "denied"

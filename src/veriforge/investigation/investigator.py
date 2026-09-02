@@ -11,6 +11,16 @@ grafted onto an unrelated bug. `build_root_cause` takes the originating
 `Requirement` (optional, defaulting to the old always-comment behavior for
 existing callers) and only includes the role-check note when the
 requirement's kind actually makes it a relevant signal.
+
+Phase 15's duplicate-creation requirement is a real gap in that scheme: its
+phrasing ("...must not create two projects.") gets classified NEGATIVE by
+the parser purely because it contains "must not", which *is* one of the
+kinds treated as role-check-relevant below -- but the finding has nothing to
+do with role/permission checks at all. `build_root_cause` also excludes it
+by checking `structured["concurrency_check"]` directly rather than trusting
+Kind alone, the same lesson Phase 11's `db_check` exclusion could only
+half-teach (it worked there only because that requirement happened to
+classify FUNCTIONAL, not because anything checked its structured shape).
 """
 from __future__ import annotations
 
@@ -30,7 +40,15 @@ def build_root_cause(
 ) -> str:
     parts = [verdict.reasoning]
 
-    if requirement is None or requirement.kind in _ROLE_CHECK_RELEVANT_KINDS:
+    is_concurrency_shaped = bool(
+        requirement is not None
+        and requirement.structured
+        and requirement.structured.get("concurrency_check")
+    )
+    role_check_relevant = requirement is None or (
+        requirement.kind in _ROLE_CHECK_RELEVANT_KINDS and not is_concurrency_shaped
+    )
+    if role_check_relevant:
         if not endpoint.mentions_role_check:
             parts.append(
                 f"Static analysis of {endpoint.source_file}:{endpoint.source_line} found no "

@@ -5,6 +5,14 @@ running this test suite never pollutes the real fixture) -- and that
 generated file is actually run via a real `pytest` subprocess, not just
 checked for valid syntax, to prove it's genuinely executable and correctly
 asserts the fix (so it currently fails, since the bug is still there).
+
+Phase 15 added a third, higher-priority (NEGATIVE/security-shaped)
+requirement to the same db-requirements.md, so the single top-ranked
+experiment this test's one job run executes and regresses is now that one
+(the duplicate-creation/idempotency bug) rather than Phase 11's soft-delete
+bug -- see tests/integration/test_db_observation.py's own updated docstring
+for the same ranking shift, handled there with a two-run sequence instead
+since that test specifically exists to verify the Phase 11 bug.
 """
 from __future__ import annotations
 
@@ -85,9 +93,9 @@ def test_bug_verified_finding_writes_an_executable_regression_test(store, tmp_pa
         assert findings[0].regression_test_path == str(regression_path)
 
         # Prove it's genuinely executable, not just syntactically valid --
-        # run it for real via pytest. It should FAIL: the soft-delete bug is
-        # still present, so the regression assertion (expects PASS) doesn't
-        # hold yet.
+        # run it for real via pytest. It should FAIL: example-db-app has no
+        # idempotency protection, so the regression assertion (expects
+        # PASS) doesn't hold yet.
         result = subprocess.run(
             [sys.executable, "-m", "pytest", str(regression_path), "-q"],
             cwd=str(target_repo),
@@ -95,7 +103,7 @@ def test_bug_verified_finding_writes_an_executable_regression_test(store, tmp_pa
             capture_output=True, text=True, timeout=60,
         )
         assert "1 failed" in result.stdout, result.stdout + result.stderr
-        assert "still physically present" in result.stdout
+        assert "no idempotency protection" in result.stdout
     finally:
         server.shutdown()
         thread.join(timeout=5)

@@ -66,6 +66,14 @@ def test_db_removal_is_executable_with_action_and_object():
     assert is_executable(req) is True
 
 
+def test_duplicate_creation_is_executable_with_action_and_object():
+    req = Requirement(
+        project_id="p", source_text="x", kind=RequirementKind.NEGATIVE,
+        structured={"concurrency_check": "no_duplicate_on_creation_replay", "object": "projects", "action": "create"},
+    )
+    assert is_executable(req) is True
+
+
 # ---- run_experiment dispatch, against the real example app ----
 
 def test_run_experiment_endpoint_exposed_passes_against_real_app(store, example_app_server):
@@ -156,4 +164,49 @@ def test_run_experiment_db_removal_fails_against_real_app_when_db_path_given(sto
 
     assert result.oracle_verdict.verdict == Verdict.FAIL  # the planted soft-delete bug
     assert result.finding is not None
+    executor.shutdown()
+
+
+def test_run_experiment_duplicate_creation_without_db_path_raises(store, example_db_app_server):
+    base_url, _db_path = example_db_app_server
+    executor = make_executor(store)
+    requirement = Requirement(
+        project_id="p",
+        source_text="A duplicated project-creation request must not create two projects.",
+        kind=RequirementKind.NEGATIVE, critical=True,
+        structured={"concurrency_check": "no_duplicate_on_creation_replay", "object": "projects", "action": "create"},
+    )
+    endpoint = ApiEndpoint(project_id="p", method="POST", path="/projects", source_file="app.py", source_line=60)
+    test = Test(project_id="p", name=requirement.source_text)
+
+    with pytest.raises(ValueError, match="db_path"):
+        run_experiment(
+            base_url=base_url, requirement=requirement, endpoint=endpoint,
+            all_endpoints=[endpoint], tool_executor=executor, test=test,
+        )
+    executor.shutdown()
+
+
+def test_run_experiment_duplicate_creation_fails_against_real_app_when_db_path_given(store, example_db_app_server):
+    # example-db-app has no idempotency protection at all -- a request
+    # delivered twice at the network layer genuinely creates two rows.
+    base_url, db_path = example_db_app_server
+    executor = make_executor(store)
+    requirement = Requirement(
+        project_id="p",
+        source_text="A duplicated project-creation request must not create two projects.",
+        kind=RequirementKind.NEGATIVE, critical=True,
+        structured={"concurrency_check": "no_duplicate_on_creation_replay", "object": "projects", "action": "create"},
+    )
+    endpoint = ApiEndpoint(project_id="p", method="POST", path="/projects", source_file="app.py", source_line=60)
+    test = Test(project_id="p", name=requirement.source_text)
+
+    result = run_experiment(
+        base_url=base_url, requirement=requirement, endpoint=endpoint,
+        all_endpoints=[endpoint], tool_executor=executor, test=test, db_path=db_path,
+    )
+
+    assert result.oracle_verdict.verdict == Verdict.FAIL
+    assert result.finding is not None
+    assert [o.tool for o in result.observations] == ["database.query_sqlite", "api.post", "database.query_sqlite"]
     executor.shutdown()

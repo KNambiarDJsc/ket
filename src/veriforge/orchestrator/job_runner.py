@@ -384,8 +384,11 @@ class JobRunner:
                 continue
             # Phase 11: a db_check requirement needs a real database to read
             # from -- without --db-path, leave it queued rather than attempt
-            # (and fail) an execution with nothing to connect to.
+            # (and fail) an execution with nothing to connect to. Phase 15's
+            # concurrency_check needs the same real database read.
             if requirement.structured.get("db_check") and not job.db_path:
+                continue
+            if requirement.structured.get("concurrency_check") and not job.db_path:
                 continue
             endpoint = match_endpoint_for_requirement(requirement, world_model.api_endpoints)
             if endpoint is None:
@@ -580,7 +583,10 @@ class JobRunner:
             event_count=len(events),
             tool_calls_used=self._budget.tool_calls_used,
             regression_test_path=execution.get("regression_test_path"),
-            next_phase="Phase 14 (Environment Engineering: Docker-based isolated environments, seed data, fault injection)",
+            next_phase=(
+                "Phase 16 (Evaluation Lab + Harness Auditor: benchmark apps with known, seeded bugs, "
+                "tracked verified-findings/compute and false-positive-rate metrics)"
+            ),
         )
         self._write_artifact(job, "run-summary.json", summary.__dict__)
         return summary

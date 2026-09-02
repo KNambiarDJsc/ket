@@ -31,6 +31,12 @@ Temporal and true cross-service workflows still have no Oracle
 implementation — Phase 9/10/11 only execute what they can honestly judge;
 everything else stays unexecuted (see execution/http_executor.py,
 execution/db_executor.py, and execution/experiment_runner.is_executable).
+
+Phase 15 adds `judge_duplicate_creation`: a real database row count is the
+only honest ground truth here — an API response alone can't distinguish "one
+resource created" from "two resources created, one response discarded by a
+flaky network" (exactly what Phase 14's FaultInjectingProxy's duplicate_paths
+simulates). Judged purely on the row-count delta, not on any HTTP status.
 """
 from __future__ import annotations
 
@@ -193,4 +199,26 @@ def judge_creation_visibility(listing_entry: dict | None, schema_mismatches: lis
         Verdict.PASS, 0.9, "visible in the listing with matching fields", "consistent",
         "The newly created resource appeared in the listing endpoint's response with fields matching "
         "the creation response.",
+    )
+
+
+def judge_duplicate_creation(row_count_delta: int) -> OracleVerdict:
+    if row_count_delta == 1:
+        return OracleVerdict(
+            Verdict.PASS, 0.9, "exactly one row created", "1 row created",
+            "The table's row count increased by exactly one despite the creation request being "
+            "delivered to the backend twice — the endpoint is idempotent under duplicated delivery.",
+        )
+    if row_count_delta > 1:
+        return OracleVerdict(
+            Verdict.FAIL, 0.9, "exactly one row created", f"{row_count_delta} rows created",
+            f"The table's row count increased by {row_count_delta} after a single client request was "
+            "delivered to the backend twice — the endpoint has no idempotency protection, so a "
+            "duplicated/retried network request silently creates duplicate resources. This violates "
+            "the requirement.",
+        )
+    return OracleVerdict(
+        Verdict.UNCERTAIN, 0.3, "exactly one row created", f"{row_count_delta} rows created",
+        f"The table's row count changed by {row_count_delta} (expected exactly 1); this doesn't clearly "
+        "confirm or rule out a duplicate-creation vulnerability.",
     )

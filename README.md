@@ -4,7 +4,7 @@ Autonomous Software Verification & Testing OS. See `docs/PHASES.md` for the
 full architecture-to-phase mapping and the prior art (Ralph loop, Anthropic
 harness-engineering, EnvHarness, Claude Skills) this design draws from.
 
-This repo currently implements **Phase 0-14** (adds Project persistence/reuse
+This repo currently implements **Phase 0-15** (adds Project persistence/reuse
 across runs, episodic/semantic/procedural Memory, evaluation-gated
 Learning, two more executable invariant kinds — data-invariant status
 checks and the positive "only X may do this" authorization case — two
@@ -116,8 +116,19 @@ real running app) rather than wired into the CLI yet — that integration
 waits for Phase 15's concurrency/security engine to have a real scenario
 that needs it.
 
-Everything past that (Security/Concurrency, evaluation lab...) is future
-phase work — see `docs/PHASES.md` for the tracker.
+Phase 15 adds one executable Security + Concurrency check: a duplicated
+resource-creation request must not create two resources. It composes Phase
+14's `FaultInjectingProxy` (delivers one client request to the live backend
+twice) with Phase 11's direct-database read (counts the resulting rows —
+an API response alone can't tell "one resource" from "two, one response
+discarded by the network"). Against the bundled example-db-app, which has
+no idempotency protection at all, this finds and reproduces a genuine
+`SECURITY_FINDING`: a duplicated request silently creates two rows. Cross-
+account/IDOR access, privilege escalation, and true concurrent (as opposed
+to network-duplicated) requests are deferred — see `docs/PHASES.md` for why.
+
+Everything past that (the rest of Security/Concurrency, evaluation lab...)
+is future phase work — see `docs/PHASES.md` for the tracker.
 
 ## Setup
 

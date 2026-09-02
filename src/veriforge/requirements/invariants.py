@@ -17,6 +17,19 @@ database" -- a data-integrity requirement no amount of calling the
 application's own API can validate, since the point is to catch an API that
 lies about having removed something. Reuses the existing action/object
 endpoint-matching path rather than inventing a new one.
+
+Phase 15 adds `_extract_concurrency_check`: "A duplicated X-creation request
+must not create two X" -- needs Phase 14's FaultInjectingProxy to actually
+deliver a request twice at the network layer, plus Phase 11's direct-DB read
+to count the resulting rows (an API-only check can't distinguish "one row"
+from "two rows with the same reported id" the way a raw SELECT COUNT can).
+Tried with *higher* priority than the Kind-based dispatch, not merely as a
+fallback like Phase 10/11's shapes: the parser classifies this sentence
+NEGATIVE (it contains "must not"), and `_extract_authorization`'s generic
+actor/action/object pattern would otherwise also match it -- wrongly, since
+"a duplicated project-creation request" is not an actor. Letting the more
+specific pattern go first avoids ever producing that wrong structure instead
+of catching it after the fact.
 """
 from __future__ import annotations
 
@@ -77,6 +90,18 @@ _ENDPOINT_EXPOSURE_PATTERN = re.compile(
 _DB_REMOVAL_PATTERN = re.compile(
     r"deleted\s+(?P<object>[\w\s]+?)\s+must\s+(?:be\s+)?(?:actually\s+|permanently\s+)?removed\s+from\s+"
     r"(?:the\s+)?(?:database|storage|db)\b",
+    re.IGNORECASE,
+)
+
+# Phase 15: "A duplicated project-creation request must not create two
+# projects." -- the object is captured from the trailing plural noun ("two
+# projects"), not the leading singular compound modifier ("project-
+# creation"): the former matches both a discovered endpoint's path and a
+# real database table name (both plural), the latter would silently resolve
+# to the wrong table ("project" instead of "projects").
+_DUPLICATE_CREATION_PATTERN = re.compile(
+    r"^a\s+duplicated\s+[\w]+-creation\s+request\s+must\s+not\s+create\s+"
+    r"(?:two|more\s+than\s+one|duplicate)\s+(?P<object>\S+?)\.?$",
     re.IGNORECASE,
 )
 
@@ -209,6 +234,17 @@ def _extract_db_check(text: str) -> dict | None:
     return None
 
 
+def _extract_concurrency_check(text: str) -> dict | None:
+    match = _DUPLICATE_CREATION_PATTERN.match(text)
+    if match:
+        return {
+            "concurrency_check": "no_duplicate_on_creation_replay",
+            "object": match.group("object").strip(),
+            "action": "create",
+        }
+    return None
+
+
 _EXTRACTORS = {
     RequirementKind.NEGATIVE: _extract_authorization,
     RequirementKind.AUTHORIZATION: _extract_authorization,
@@ -219,6 +255,14 @@ _EXTRACTORS = {
 
 
 def extract_invariant(requirement: Requirement) -> dict | None:
+    # Phase 15, checked first and Kind-independently: this phrasing's own
+    # "must not create ..." shape also satisfies the generic NEGATIVE
+    # actor/action/object pattern below (the parser classifies it NEGATIVE
+    # purely because it contains "must not"), which would otherwise produce
+    # a nonsensical authorization structure instead of this one.
+    structured = _extract_concurrency_check(requirement.source_text)
+    if structured is not None:
+        return structured
     extractor = _EXTRACTORS.get(requirement.kind)
     structured = extractor(requirement.source_text) if extractor else None
     if structured is None:

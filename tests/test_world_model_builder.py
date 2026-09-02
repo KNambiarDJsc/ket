@@ -138,3 +138,25 @@ def test_db_removal_requirement_matches_delete_endpoint():
     assert "Matched to DELETE /projects/" in rationale
     assert "Phase 11" in rationale
     assert "data-integrity requirement" in rationale
+
+
+def test_duplicate_creation_requirement_matches_creation_endpoint():
+    repo_facts = {
+        "endpoints": [
+            {"method": "POST", "path": "/projects", "source_file": "app.py", "source_line": 60, "mentions_role_check": False},
+        ],
+    }
+    req = Requirement(
+        project_id="proj_1",
+        source_text="A duplicated project-creation request must not create two projects.",
+        kind=RequirementKind.NEGATIVE, critical=True,
+    )
+    world_model = build_world_model("proj_1", [req], repo_facts)
+
+    assert req.structured == {
+        "concurrency_check": "no_duplicate_on_creation_replay", "object": "projects", "action": "create",
+    }
+    rationale = world_model.unknowns[0].rationale
+    assert "Matched to POST /projects" in rationale
+    assert "Phase 15" in rationale
+    assert "request-duplication/idempotency requirement" in rationale

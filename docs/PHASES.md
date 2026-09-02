@@ -57,7 +57,7 @@ explicitly deferred.
 | 12 | **Skill System**: `skills/*/SKILL.md` as versioned, evaluable procedural knowledge; a retriever the Context Compiler calls, not a blob injected into every context | ✅ (retriever + Context Compiler integration + 3 real skills documenting Phases 6/10/11's own testing approaches; evaluation itself deferred to Phase 16) |
 | 13 | **Test Healer** (selector/timing/locator fixes only, never weakens an assertion — every heal produces a diff) **+ Regression Engine, including regression-test generation**: a `BUG_VERIFIED` Finding gets a permanent, executable regression test file written to the project's own test suite (not just a `Test` row) — application source is never touched; re-run only the requirements/tests the World Model says a diff actually affects | ✅ (opt-in via `--write-regressions`; also closes Phase 5's change_relevance placeholder and Phase 8's stale-memory gap with a real git-diff signal — see notes) |
 | 14 | **Environment Engineering**: Docker-based isolated environments, seed data/users, fault injection (latency, timeout, service failure, duplicate event, stale state). Unlocks Advanced: concurrency, failure/recovery, chaos | ✅ (three standalone modules against a real Docker daemon/real HTTP proxy; JobRunner/CLI wiring deferred — see notes) |
-| 15 | **Security + Concurrency** hypothesis engine: cross-account access, privilege escalation, object enumeration, race conditions/duplicate actions — needs Phase 14's multi-identity/fault-injection environment to be real rather than single-case | not started |
+| 15 | **Security + Concurrency** hypothesis engine: cross-account access, privilege escalation, object enumeration, race conditions/duplicate actions — needs Phase 14's multi-identity/fault-injection environment to be real rather than single-case | ✅ (one executable concurrency/idempotency check, composing Phase 14's fault-injecting proxy with Phase 11's DB read; cross-account/IDOR, privilege escalation, and true concurrent races deferred — see notes) |
 | 16 | **Evaluation Lab + Harness Auditor**: multiple benchmark apps with known, seeded bugs; tracks the metrics in §42 (verified findings/compute, information gain/experiment, false-positive rate); harness/strategy changes must clear this bar before being kept — this is what makes Phase 8's "keep/revert" gate statistically meaningful instead of n=1 | not started |
 | 17 | **Source connectors + durable multi-run architecture**: GitHub (App) as one `SourceProvider` implementation (never the core abstraction), immutable-commit resolution, isolated per-run workspace, Project-vs-Run state separation, crash-resume via existing checkpoint primitives (`LoopState`/`BudgetTracker`) hardened and actually tested against a mid-run kill | not started |
 | 18 | **Software Knowledge Graph + Code Intelligence retrieval**: promote the flat `WorldModel` into a real linked graph (Requirement→Feature→Workflow→UI→API→Code→DB→Test→Finding) with `search_code`/`read_symbol`/`find_callers`-style tools and hybrid (lexical+semantic+graph) retrieval. Deferred this late deliberately — it's only worth its complexity against a real multi-file, multi-language codebase, not a 70-line example app | not started |
@@ -953,6 +953,118 @@ actually needs it — building that wiring now would mean inventing the
 integration shape rather than deriving it from a real caller, the same
 discipline Phase 10 used to defer service-to-service workflows until a
 real second service existed to test against.
+
+## Phase 15 implementation notes
+
+One executable shape out of the four the phase description names (cross-
+account access, privilege escalation, object enumeration, race conditions/
+duplicate actions) — the same "one real vertical slice, not a grab-bag"
+discipline Phase 9 used for temporal/ordering and Phase 10 used for
+service-to-service workflows. Duplicate-action/idempotency was chosen
+because it's the one Phase 14 was explicitly built to unlock (`fault_
+proxy.py`'s own docstring already named "test whether a POST is safe
+against a duplicated create" as the intended use); the other three all need
+per-actor resource *ownership* modeled in an example app, which neither
+`example-app` nor `example-db-app` has yet — see "Deferred" below.
+
+- **`execution/concurrency_executor.py` — `execute_duplicate_creation_check`**:
+  the first Executor to *compose* two earlier phases' capabilities instead
+  of adding a new primitive. Counts a table's rows via `database.
+  query_sqlite` (Phase 11), starts a `FaultInjectingProxy` (Phase 14) in
+  front of the live target with `duplicate_paths` set to the creation
+  endpoint, POSTs through the proxy (which delivers that one request to the
+  real backend twice), then counts the rows again. The row-count *delta* is
+  the only honest ground truth: an API response alone can't distinguish
+  "one resource created" from "two created, one response discarded by the
+  network" — exactly the ambiguity a duplicated request creates.
+- **`oracle/oracle.judge_duplicate_creation`**: delta == 1 → PASS
+  (idempotent), delta > 1 → FAIL (no idempotency protection — a
+  duplicated/retried request silently creates duplicates), anything else →
+  UNCERTAIN (doesn't confirm or rule out the vulnerability).
+- **A new requirement shape, given priority over the Kind-based dispatch —
+  a real ambiguity, not a stylistic choice.** `requirements/invariants.
+  _extract_concurrency_check` recognizes "A duplicated X-creation request
+  must not create two X." The parser classifies this sentence NEGATIVE
+  (it contains "must not"), and `_extract_authorization`'s generic
+  actor/action/object pattern *also* matches it — wrongly, treating "a
+  duplicated project-creation request" as an actor. Every prior Kind-
+  independent fallback (Phase 10's contract shapes, Phase 11's db_check)
+  ran *after* the Kind-based extractor and only kicked in when it returned
+  `None`; this is the first case where the Kind-based path would have
+  matched *first*, silently wrong, so `extract_invariant` tries this
+  extractor before the Kind dispatch instead of after it. Confirmed with a
+  dedicated test asserting the wrong (`actor`/`denied`) shape never appears.
+  The object is captured from the trailing plural noun ("two project**s**"),
+  not the leading singular compound ("project-creation") — the plural is
+  what actually matches both a discovered endpoint's path and the real
+  database table name; a first draft captured the singular and broke
+  against the real app with `sqlite3.OperationalError: no such table:
+  project`, caught immediately by running the executor test against the
+  real example-db-app rather than a mock.
+- **A second real Kind-alignment gap, this time in the Investigator.**
+  `investigation.investigator.build_root_cause` only ever suppressed its
+  role/permission-check commentary by checking `Requirement.kind` against a
+  fixed set that includes NEGATIVE — correct for authorization-shaped
+  NEGATIVE requirements, but this phase's duplicate-creation requirement is
+  *also* NEGATIVE (same "must not" classification quirk as above) and has
+  nothing to do with role checks. Phase 11's db_check requirement dodged
+  this same class of bug only by incidental luck — it happens to classify
+  FUNCTIONAL, not because anything checked its structured shape. Fixed by
+  also checking `structured["concurrency_check"]` directly, the more
+  robust fix Phase 11 could have made but didn't need to at the time.
+- **`world_model/builder._concurrency_rationale`**: mirrors `_db_check_
+  rationale`'s shape — names what's needed to execute it (a fault-injecting
+  proxy and a `--db-path`) before either exists in the Unknown's rationale.
+- **Reuses the existing `db_path` gate**, exactly like Phase 11's db_check:
+  `job_runner._execute_top_experiment` leaves a concurrency_check
+  requirement queued (never attempted) without `--db-path`, rather than
+  attempting an execution with nothing to read from.
+- **A real, live-verified finding, not just unit tests.** Added one line to
+  `examples/db-requirements.md`: "A duplicated project-creation request
+  must not create two projects." A real `veriforge verify --db-path ...`
+  CLI run against the live example-db-app ranked it the single top
+  hypothesis, executed it, and confirmed a genuine `SECURITY_FINDING`
+  (confidence 0.9, reproduced on a second independent run): example-db-app
+  generates a fresh row on every POST it actually receives, with no
+  idempotency key at all, so a request delivered twice at the network layer
+  genuinely creates two rows — an emergent property of the app's
+  intentional simplicity, not an artificially planted bug.
+- **A real ranking collision this surfaced, fixed honestly rather than
+  avoided.** `strategist/scientist._RISK_BY_KIND` scores NEGATIVE
+  requirements at 0.8 versus FUNCTIONAL's 0.3 — so this new requirement
+  legitimately outranks Phase 11's soft-delete db_check requirement in the
+  same `db-requirements.md`, and a job run only ever executes the single
+  top-ranked *executable* candidate. That broke two pre-existing Phase
+  11/13 integration tests that hardcoded the old top-ranked hypothesis text.
+  Not a bug to paper over — a real, higher-priority finding legitimately
+  displacing a lower-priority one is exactly what a ranking system is for,
+  the same kind of reshuffle Phase 9's second requirement caused for Phase
+  8's two-run memory demo. Fixed by restructuring `tests/integration/
+  test_db_observation.py`'s flagship test into a two-run sequence (mirroring
+  `test_memory_across_runs.py`'s own established pattern): run 1 confirms
+  the new higher-priority bug, memory (Phase 8/13) resolves it, and run 2 —
+  with that Unknown excluded from ranking — falls through to exactly the
+  ranking this test verified before Phase 15 existed. `tests/integration/
+  test_regression_engine_e2e.py`'s expected regression-test output text was
+  updated the same way, needing no changes to the Regression Engine itself:
+  `regression/generator.py` already reuses `run_experiment` generically, so
+  generating and executing a regression test for the new shape worked
+  without modification the first time.
+
+**Deferred, explicitly.** Cross-account/IDOR object access and privilege
+escalation both need per-actor resource *ownership* — "can actor B see a
+resource actor A already owns" has no answer when neither example app
+tracks who created what. Modeling that honestly means extending an example
+app's schema, not guessing at ownership from nothing, and belongs in its
+own pass once there's a concrete use for it, matching how Phase 11 added a
+whole second example app rather than retrofitting the first one just to
+exercise a new code path. True concurrent (multi-threaded, actually-racing)
+requests are also out of scope here: `FaultInjectingProxy` is deliberately
+single-threaded (its own docstring says so), so `duplicate_paths` proves a
+duplicated request's *outcome*, not a genuine timing race between two
+in-flight requests — that needs a concurrency environment `HTTPServer`
+alone can't provide, left for when Phase 15's own scope gets revisited
+alongside Phase 19's Advanced-testing-channel work.
 
 ## Local-first model policy
 

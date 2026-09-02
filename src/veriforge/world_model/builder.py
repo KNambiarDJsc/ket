@@ -124,6 +124,21 @@ def _db_check_rationale(endpoint: ApiEndpoint | None) -> str:
     )
 
 
+def _concurrency_rationale(endpoint: ApiEndpoint | None) -> str:
+    if endpoint is None:
+        return (
+            "No matching endpoint found by static analysis for this requirement's action/object; "
+            "requirement coverage unknown."
+        )
+    return (
+        f"Matched to {endpoint.method} {endpoint.path} ({endpoint.source_file}:{endpoint.source_line}); "
+        "this is a request-duplication/idempotency requirement -- an API response alone can't tell "
+        "whether the backend actually processed the request once or twice. Not yet executed — needs "
+        "the Executor/Oracle (Phase 15) to actually deliver the request twice via a fault-injecting "
+        "proxy (Phase 14) and a --db-path to count the resulting rows directly (Phase 11)."
+    )
+
+
 def _authorization_like_rationale(endpoint: ApiEndpoint | None) -> str:
     if endpoint is not None and not endpoint.mentions_role_check:
         return (
@@ -153,6 +168,8 @@ def build_unknowns(requirements: list[Requirement], endpoints: list[ApiEndpoint]
             rationale = _contract_rationale(req.structured, endpoint)
         elif req.structured and req.structured.get("db_check") and endpoint is not None:
             rationale = _db_check_rationale(endpoint)
+        elif req.structured and req.structured.get("concurrency_check") and endpoint is not None:
+            rationale = _concurrency_rationale(endpoint)
         else:
             rationale = _authorization_like_rationale(endpoint)
         unknowns.append(
