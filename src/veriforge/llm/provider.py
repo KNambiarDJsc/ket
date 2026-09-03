@@ -28,6 +28,17 @@ class LLMProvider(ABC):
     @abstractmethod
     def model_name(self) -> str: ...
 
+    def embed(self, text: str) -> list[float]:
+        """Returns a real embedding vector for `text` (Phase 18: the
+        semantic leg of hybrid code retrieval). Not abstract, and not
+        implemented here: every existing provider/test-double predates this
+        method, and every one of them stayed correct by inheriting this
+        honest "unavailable" default rather than being forced to fake a
+        vector. Only `OllamaProvider` (via the locally-pulled
+        `nomic-embed-text` model docs/PHASES.md has named as reserved for
+        this since Phase 2) actually overrides it."""
+        raise LLMUnavailableError(f"{self.model_name} does not implement embed()")
+
 
 class NullLLMProvider(LLMProvider):
     """Always-unavailable provider for harness paths that need an

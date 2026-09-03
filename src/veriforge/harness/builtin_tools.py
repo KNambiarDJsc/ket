@@ -11,6 +11,7 @@ import httpx
 
 from veriforge.cartography.cartographer import analyze as analyze_repository_facts
 from veriforge.cartography.filesystem import scan_repository
+from veriforge.code_intelligence.symbols import build_symbol_index, find_callers, read_symbol, search_code
 from veriforge.domain.enums import RiskLevel
 from veriforge.execution.db_executor import run_read_only_query
 from veriforge.explorer.browser import BrowserExplorer
@@ -122,6 +123,42 @@ def register_builtin_tools(registry: ToolRegistry, llm: LLMProvider) -> None:
             timeout_seconds=10.0,
         ),
         handler=lambda db_path, query, params=None: run_read_only_query(db_path, query, params),
+    )
+
+    # Phase 18: real, AST-based code intelligence -- READ risk for the same
+    # reason code.analyze_repository is: these only ever read source files,
+    # never execute or modify them. Each call re-walks the repo rather than
+    # caching an index across calls, matching code.analyze_repository's own
+    # "re-analyze fresh every time" precedent -- simpler, and correct if the
+    # repo changed between calls.
+    registry.register(
+        ToolSpec(
+            name="code.search",
+            description="Grep-style, case-insensitive substring search across every .py file in a repo.",
+            risk=RiskLevel.READ,
+            timeout_seconds=15.0,
+        ),
+        handler=lambda repo_path, query, max_results=50: search_code(repo_path, query, max_results=max_results),
+    )
+
+    registry.register(
+        ToolSpec(
+            name="code.read_symbol",
+            description="Returns the source of a named function/class/method (by name or Class.method qualname).",
+            risk=RiskLevel.READ,
+            timeout_seconds=15.0,
+        ),
+        handler=lambda repo_path, name: read_symbol(build_symbol_index(repo_path), name),
+    )
+
+    registry.register(
+        ToolSpec(
+            name="code.find_callers",
+            description="Finds every call site (file, line, enclosing function) for a named function/method.",
+            risk=RiskLevel.READ,
+            timeout_seconds=15.0,
+        ),
+        handler=lambda repo_path, name: find_callers(build_symbol_index(repo_path), name),
     )
 
     registry.register(

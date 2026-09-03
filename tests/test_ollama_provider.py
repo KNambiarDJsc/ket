@@ -24,3 +24,26 @@ def test_live_ollama_smoke():
     result = provider.generate("Reply with exactly the word: pong")
     assert isinstance(result, str)
     assert len(result) > 0
+
+
+# ---- embed() (Phase 18) ----
+
+def test_unreachable_host_raises_on_embed():
+    provider = OllamaProvider(model="llama3.2:3b", host="http://localhost:19999")
+    with pytest.raises(LLMUnavailableError):
+        provider.embed("hello")
+
+
+def test_live_ollama_embed_smoke():
+    """Skips if nomic-embed-text isn't actually pulled on this machine --
+    same honest-degradation shape as test_live_ollama_smoke above. Embedding
+    and chat models are pulled independently, so this can skip even when
+    the chat smoke test above doesn't, and vice versa."""
+    provider = OllamaProvider()
+    try:
+        vector = provider.embed("hello world")
+    except LLMUnavailableError:
+        pytest.skip("Ollama not running locally with nomic-embed-text pulled")
+    assert isinstance(vector, list)
+    assert len(vector) > 0
+    assert all(isinstance(x, float) for x in vector)

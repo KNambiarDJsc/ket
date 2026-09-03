@@ -8,6 +8,7 @@ from veriforge.llm.provider import LLMProvider, LLMUnavailableError
 
 DEFAULT_HOST = "http://localhost:11434"
 DEFAULT_MODEL = "llama3.2:3b"
+DEFAULT_EMBED_MODEL = "nomic-embed-text"
 
 
 class OllamaProvider(LLMProvider):
@@ -26,6 +27,7 @@ class OllamaProvider(LLMProvider):
     ):
         self._model = model or os.environ.get("VERIFORGE_LLM_MODEL", DEFAULT_MODEL)
         self._host = host or os.environ.get("VERIFORGE_OLLAMA_HOST", DEFAULT_HOST)
+        self._embed_model = os.environ.get("VERIFORGE_EMBED_MODEL", DEFAULT_EMBED_MODEL)
         self._timeout = timeout
 
     @property
@@ -59,3 +61,27 @@ class OllamaProvider(LLMProvider):
             ) from exc
         data = resp.json()
         return data.get("response", "")
+
+    def embed(self, text: str) -> list[float]:
+        """Real embedding via Ollama's /api/embeddings, using the separate,
+        locally-pulled `nomic-embed-text` model (never the chat model --
+        embedding and generation are different model families). Model
+        selection mirrors `generate`'s: VERIFORGE_EMBED_MODEL env var, else
+        DEFAULT_EMBED_MODEL."""
+        try:
+            resp = httpx.post(
+                f"{self._host}/api/embeddings",
+                json={"model": self._embed_model, "prompt": text},
+                timeout=self._timeout,
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise LLMUnavailableError(
+                f"Ollama at {self._host} unreachable or embedding model '{self._embed_model}' "
+                f"not pulled: {exc}"
+            ) from exc
+        data = resp.json()
+        embedding = data.get("embedding")
+        if not embedding:
+            raise LLMUnavailableError(f"Ollama returned no embedding for model '{self._embed_model}'")
+        return embedding
