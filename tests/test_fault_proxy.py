@@ -5,6 +5,15 @@ import pytest
 
 from veriforge.environment.fault_proxy import FaultConfig, FaultInjectingProxy
 
+# For timing-sensitive assertions only: httpx.get()/request() (module-level
+# shortcuts) construct a brand-new Client per call, and with the default
+# trust_env=True that means re-probing the OS for proxy settings (on
+# Windows, the registry) on every single call -- 15-20x slower in practice
+# on a machine with corporate proxy configuration, which would otherwise
+# swamp the actual thing being measured here. A reused, trust_env=False
+# client isolates the proxy's own latency from this unrelated overhead.
+_timing_client = httpx.Client(trust_env=False)
+
 
 def start_proxy(backend_base_url, **fault_kwargs):
     # Normalize "localhost" -> "127.0.0.1": the example_db_app_server fixture
@@ -45,7 +54,7 @@ def test_latency_fault_adds_measurable_delay(example_db_app_server):
     proxy, proxy_url = start_proxy(backend_url, latency_ms=300)
     try:
         start = time.monotonic()
-        httpx.get(f"{proxy_url}/")
+        _timing_client.get(f"{proxy_url}/")
         elapsed = time.monotonic() - start
         assert elapsed >= 0.25
     finally:
@@ -57,7 +66,7 @@ def test_no_latency_fault_is_fast(example_db_app_server):
     proxy, proxy_url = start_proxy(backend_url)
     try:
         start = time.monotonic()
-        httpx.get(f"{proxy_url}/")
+        _timing_client.get(f"{proxy_url}/")
         elapsed = time.monotonic() - start
         assert elapsed < 0.25
     finally:

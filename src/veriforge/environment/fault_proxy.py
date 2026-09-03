@@ -61,6 +61,16 @@ class FaultInjectingProxy:
         self._thread: Thread | None = None
         self._stale_cache: dict[str, tuple[int, dict, bytes]] = {}
         self._request_counts: dict[str, int] = {}
+        # A reused Client, not the httpx.request()/httpx.get() module-level
+        # shortcuts: those construct a brand-new Client per call, and with
+        # the default trust_env=True that means re-probing the OS for proxy
+        # settings (env vars, and on Windows the registry) on every single
+        # forwarded request -- 15-20x slower in practice on a machine with
+        # corporate proxy configuration. trust_env=False is also the more
+        # correct behavior here regardless of speed: a test fault proxy
+        # forwarding to a local backend must never itself get silently
+        # routed through a real proxy.
+        self._client = httpx.Client(trust_env=False, timeout=10.0)
 
     def start(self, port: int = 0) -> str:
         proxy = self
@@ -89,9 +99,10 @@ class FaultInjectingProxy:
             self._server.shutdown()
         if self._thread is not None:
             self._thread.join(timeout=5)
+        self._client.close()
 
     def _forward(self, method: str, path: str, headers: dict, body: bytes | None) -> httpx.Response:
-        return httpx.request(method, self._backend + path, headers=headers, content=body, timeout=10.0)
+        return self._client.request(method, self._backend + path, headers=headers, content=body)
 
     def _should_fail(self, path: str) -> bool:
         if self._faults.failure_rate <= 0:
