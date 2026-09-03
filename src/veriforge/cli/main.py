@@ -8,13 +8,13 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from veriforge.ci.pr_reporter import InvalidPrTargetError, format_pr_comment, parse_pr_target, post_pr_comment
 from veriforge.config import load_dotenv_if_present
-from veriforge.domain.models import Job, Project
 from veriforge.events.bus import EventBus
 from veriforge.llm.ollama_provider import DEFAULT_MODEL, OllamaProvider
 from veriforge.llm.openai_compatible_provider import OpenAICompatibleProvider
 from veriforge.llm.provider import LLMProvider
-from veriforge.orchestrator.job_runner import JobRunner
+from veriforge.orchestrator.run_verify import GitHubCloneError, VerifyParams, run_verify
 from veriforge.storage.db import get_engine, get_session
 from veriforge.storage.repository import Store
 from veriforge.storage.schema import create_all
@@ -31,6 +31,25 @@ def _build_llm_provider(provider: str, model: str | None) -> LLMProvider:
     return OllamaProvider(model=model or DEFAULT_MODEL)
 
 
+def _post_pr_comment_or_warn(target: str, *, job_id: str, repo_display: str, verdict, findings) -> None:
+    token = os.environ.get("VERIFORGE_GITHUB_TOKEN")
+    if not token:
+        console.print("[yellow]--post-pr given but VERIFORGE_GITHUB_TOKEN is not set -- skipping.[/yellow]")
+        return
+    try:
+        owner, repo_name, pr_number = parse_pr_target(target)
+    except InvalidPrTargetError as exc:
+        console.print(f"[red]--post-pr:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    body = format_pr_comment(job_id=job_id, repo_display=repo_display, verdict=verdict, findings=findings)
+    try:
+        post_pr_comment(owner=owner, repo=repo_name, pr_number=pr_number, body=body, token=token)
+    except Exception as exc:  # noqa: BLE001 - a failed PR post shouldn't mask a successful job run
+        console.print(f"[red]Failed to post PR comment:[/red] {exc}")
+        return
+    console.print(f"[green]Posted result to {target}[/green]")
+
+
 @app.callback()
 def _callback() -> None:
     """VeriForge — Autonomous Software Verification & Testing OS."""
@@ -41,7 +60,13 @@ def _callback() -> None:
 
 @app.command()
 def verify(
-    repo: Optional[str] = typer.Option(None, "--repo", help="Path to the repository under test"),
+    repo: Optional[str] = typer.Option(
+        None, "--repo", help="Path to the repository under test, or a GitHub URL to clone (Phase 17)"
+    ),
+    subdir: Optional[str] = typer.Option(
+        None, "--subdir",
+        help="Path relative to --repo's root to actually analyze (useful when --repo is a monorepo/GitHub clone)",
+    ),
     url: Optional[str] = typer.Option(None, "--url", help="Base URL of the running application"),
     requirements: Optional[str] = typer.Option(
         None, "--requirements", help="Path to a requirements markdown file"
@@ -68,6 +93,11 @@ def verify(
         "Falls back to VERIFORGE_LLM_MODEL, then the provider's own default.",
     ),
     workdir: str = typer.Option(".", "--workdir", help="Directory to store .veriforge/ state in"),
+    post_pr: Optional[str] = typer.Option(
+        None, "--post-pr",
+        help="Post this run's result as a comment on a GitHub PR, e.g. 'owner/repo#123' "
+        "(Phase 20). Requires VERIFORGE_GITHUB_TOKEN. Never posted unless explicitly given.",
+    ),
 ):
     """Run the full Phase 0/1 job lifecycle against a repo/URL/requirements set."""
     if not any([repo, url, requirements]):
@@ -97,37 +127,31 @@ def verify(
                 f"(Run `ollama pull {llm.model_name}` and ensure `ollama serve` is running.)"
             )
 
-    # Phase 8: reuse the same Project (and thus project_id) across runs when
-    # --repo matches one seen before, so cross-run memory has an identity to
-    # attach to. Without this, every invocation got a fresh project_id and
-    # nothing could ever be remembered.
-    project = None
-    if repo:
-        project = next((p for p in store.projects.list_all() if p.repo_path == repo), None)
-    if project is None:
-        project = Project(name=Path(repo).name if repo else "veriforge-project", repo_path=repo, base_url=url)
-        store.projects.save(project, project_id=project.id)
-
-    job = Job(
-        project_id=project.id,
-        repo_path=repo,
-        base_url=url,
-        requirements_path=requirements,
-        db_path=db_path,
-        model_name=llm.model_name,
+    params = VerifyParams(
+        repo=repo, subdir=subdir, url=url, requirements=requirements, db_path=db_path,
+        write_regressions=write_regressions, workdir=workdir,
     )
-
-    artifacts_dir = Path(workdir) / ".veriforge" / "artifacts"
-    runner = JobRunner(store, bus, llm, artifacts_dir, write_regressions=write_regressions)
-
-    console.print(f"[bold]Starting job {job.id}[/bold] (project {project.id})")
+    console.print("[bold]Starting verification run...[/bold]")
     try:
-        summary = runner.run(job)
+        outcome = run_verify(params, store=store, bus=bus, llm=llm)
+    except GitHubCloneError as exc:
+        console.print(f"[red]Failed to clone --repo:[/red] {exc}")
+        store.close()
+        raise typer.Exit(code=1) from exc
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]Job failed:[/red] {exc}")
-        raise typer.Exit(code=1) from exc
-    finally:
         store.close()
+        raise typer.Exit(code=1) from exc
+
+    if outcome.cloned_note:
+        console.print(f"[bold]{outcome.cloned_note}[/bold]")
+    console.print(f"[bold]Job {outcome.job.id}[/bold] (project {outcome.project.id})")
+    summary = outcome.summary
+    findings_for_pr = store.findings.list_by_job(outcome.job.id)
+    store.close()
+
+    if post_pr:
+        _post_pr_comment_or_warn(post_pr, job_id=outcome.job.id, repo_display=repo or "unknown", verdict=summary.verdict, findings=findings_for_pr)
 
     table = Table(title=f"VeriForge run summary — job {summary.job_id}")
     table.add_column("Field")
@@ -164,6 +188,35 @@ def verify(
     console.print("\n[bold]Artifacts:[/bold]")
     for path in summary.artifact_paths:
         console.print(f"  {path}")
+
+
+@app.command()
+def dashboard(
+    workdir: str = typer.Option(".", "--workdir", help="Directory whose .veriforge/ state to serve"),
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8420, "--port"),
+    llm_provider: str = typer.Option(
+        None, "--llm-provider", help="LLM backend for the 'ask' bar: 'ollama' (default) or 'openai'.",
+    ),
+    model: Optional[str] = typer.Option(None, "--model"),
+):
+    """Serve the VeriForge Dashboard (Phase 20) over the same .veriforge/
+    state a `verify` run against this --workdir already writes to."""
+    import uvicorn
+
+    from veriforge.dashboard.api import create_app
+
+    provider_name = llm_provider or os.environ.get("VERIFORGE_LLM_PROVIDER", "ollama")
+    engine = get_engine(workdir)
+    create_all(engine)
+    session = get_session(workdir)
+    store = Store(session)
+    bus = EventBus(store)
+    llm = _build_llm_provider(provider_name, model)
+
+    dashboard_app = create_app(store=store, bus=bus, llm=llm, workdir=workdir)
+    console.print(f"[bold]VeriForge Dashboard[/bold] on http://{host}:{port} (workdir: {workdir})")
+    uvicorn.run(dashboard_app, host=host, port=port, log_level="warning")
 
 
 if __name__ == "__main__":

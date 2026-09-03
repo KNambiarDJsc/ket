@@ -157,6 +157,8 @@ class Test(BaseModel):
 
 
 class TestRun(BaseModel):
+    __test__ = False  # tell pytest this isn't a test class despite the name
+
     id: str = Field(default_factory=lambda: new_id("run"))
     test_id: str
     started_at: datetime = Field(default_factory=utcnow)

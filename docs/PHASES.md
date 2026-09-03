@@ -59,10 +59,10 @@ explicitly deferred.
 | 14 | **Environment Engineering**: Docker-based isolated environments, seed data/users, fault injection (latency, timeout, service failure, duplicate event, stale state). Unlocks Advanced: concurrency, failure/recovery, chaos | ✅ (three standalone modules against a real Docker daemon/real HTTP proxy; JobRunner/CLI wiring deferred — see notes) |
 | 15 | **Security + Concurrency** hypothesis engine: cross-account access, privilege escalation, object enumeration, race conditions/duplicate actions — needs Phase 14's multi-identity/fault-injection environment to be real rather than single-case | ✅ (one executable concurrency/idempotency check, composing Phase 14's fault-injecting proxy with Phase 11's DB read; cross-account/IDOR, privilege escalation, and true concurrent races deferred — see notes) |
 | 16 | **Evaluation Lab + Harness Auditor**: multiple benchmark apps with known, seeded bugs; tracks the metrics in §42 (verified findings/compute, information gain/experiment, false-positive rate); harness/strategy changes must clear this bar before being kept — this is what makes Phase 8's "keep/revert" gate statistically meaningful instead of n=1 | ✅ (ground-truth manifest across both existing example apps, a Harness Auditor computing all three §42 metrics, and a before/after quality-bar gate; a genuinely new benchmark app deferred — see notes) |
-| 17 | **Source connectors + durable multi-run architecture**: GitHub (App) as one `SourceProvider` implementation (never the core abstraction), immutable-commit resolution, isolated per-run workspace, Project-vs-Run state separation, crash-resume via existing checkpoint primitives (`LoopState`/`BudgetTracker`) hardened and actually tested against a mid-run kill | not started |
-| 18 | **Software Knowledge Graph + Code Intelligence retrieval**: promote the flat `WorldModel` into a real linked graph (Requirement→Feature→Workflow→UI→API→Code→DB→Test→Finding) with `search_code`/`read_symbol`/`find_callers`-style tools and hybrid (lexical+semantic+graph) retrieval. Deferred this late deliberately — it's only worth its complexity against a real multi-file, multi-language codebase, not a 70-line example app | not started |
-| 19 | **Visual / Accessibility / Desktop / Mobile execution channels** (Advanced testing areas) — new Executor channels behind the same Experiment/Observation/Oracle contracts Phase 6 already established, not a parallel system | not started |
-| 20 | **Dashboard/UI + natural-language command bar + CI/GitHub PR integration** — the one genuinely separate product surface (a web frontend, its own stack decision). Deliberately last: it needs Phases 8–18's data model to actually have something worth displaying | not started |
+| 17 | **Source connectors + durable multi-run architecture**: GitHub (App) as one `SourceProvider` implementation (never the core abstraction), immutable-commit resolution, isolated per-run workspace, Project-vs-Run state separation, crash-resume via existing checkpoint primitives (`LoopState`/`BudgetTracker`) hardened and actually tested against a mid-run kill | ✅ (public-HTTPS `GitHubSourceProvider` + isolated per-run clone workspace + real commit resolution; GitHub App auth and crash-resume hardening deferred — see notes) |
+| 18 | **Software Knowledge Graph + Code Intelligence retrieval**: promote the flat `WorldModel` into a real linked graph (Requirement→Feature→Workflow→UI→API→Code→DB→Test→Finding) with `search_code`/`read_symbol`/`find_callers`-style tools and hybrid (lexical+semantic+graph) retrieval. Deferred this late deliberately — it's only worth its complexity against a real multi-file, multi-language codebase, not a 70-line example app | ✅ (real Requirement→Endpoint→Code/Finding/Evidence/Test graph, AST-based code intelligence, hybrid retrieval with a real embedding leg; verified against this project's own multi-file source tree — see notes) |
+| 19 | **Visual / Accessibility / Desktop / Mobile execution channels** (Advanced testing areas) — new Executor channels behind the same Experiment/Observation/Oracle contracts Phase 6 already established, not a parallel system | skipped for now (explicit direction: "phase 19 is unnecessary" — Phase 20 built directly on top of Phase 18; revisit if a real need for these channels shows up) |
+| 20 | **Dashboard/UI + natural-language command bar + CI/GitHub PR integration** — the one genuinely separate product surface (a web frontend, its own stack decision). Deliberately last: it needs Phases 8–18's data model to actually have something worth displaying | ✅ (FastAPI dashboard over the real Store — job history, findings, the Phase 18 Knowledge Graph, a read-only NL query bar, and a real GitHub PR-comment formatter/poster; Phase 19 skipped per explicit direction — see notes) |
 
 **Code Fixer is removed from this roadmap, not merely deferred.** Per
 explicit instruction: no autonomous code repair, no automatic PRs, no
@@ -1185,12 +1185,304 @@ through it) — it's proven correct against synthetic before/after audits,
 not yet exercised as a real pre-merge check on this project's own future
 work.
 
+## Phase 17 implementation notes
+
+One of the phase's two named sub-scopes — source connectors — is a real,
+live-verified vertical slice; the other — durable multi-run architecture's
+crash-resume hardening — is explicitly deferred, since it's a genuinely
+separate, substantial effort (actually killing a process mid-run and
+proving resume from a checkpoint) that doesn't share code with cloning a
+repo. Project-vs-Run state separation needed no new work at all: `Project`
+(persists across runs) vs. `Job` (one per run) has existed since Phase 8.
+
+- **`source/provider.py` — `SourceProvider`**: the abstraction (`resolve
+  (spec, workdir) -> ResolvedSource(local_path, commit_sha)`). Every
+  downstream module (the AST cartographer, `JobRunner`, regression-test
+  writing) keeps reading a plain local directory, exactly as before this
+  phase — none of them learned that `--repo` can now name something that
+  isn't already on disk.
+- **`source/local.py` — `LocalPathSourceProvider`**: the trivial case
+  every prior phase already relied on. Reuses `regression/change_impact.
+  current_commit` for its commit field rather than re-deriving `git
+  rev-parse HEAD` a second way.
+- **`source/github.py` — `GitHubSourceProvider`**: a real `git clone
+  --depth 1` into an isolated `<workdir>/sources/<random-id>` directory —
+  never reused across jobs, so two runs against the same URL (or two
+  runs that fail mid-clone) can never collide with or trip over each
+  other's checkout — followed by a real `git rev-parse HEAD` read back
+  from the fresh clone, never assumed. **Scoped honestly to public HTTPS
+  clone only**: the spec names "GitHub (App)" specifically, meaning
+  installation-token auth for private repos and webhooks — real,
+  substantial infrastructure with nothing to test it against (no App
+  registration exists), so building it now would mean guessing at an auth
+  flow rather than verifying one, the same reasoning Phase 14 used to
+  scope Docker to public daemon access rather than a private registry. A
+  private repo fails with a clear git authentication error, not a silently
+  wrong answer.
+- **CLI wiring (`cli/main.py`)**: `--repo` transparently accepts a GitHub
+  URL now — detected once by `source.github.is_github_url`, resolved via
+  `source.resolve.resolve_source_spec`, and never special-cased again
+  downstream. New `--subdir` flag points at a directory relative to the
+  resolved root (needed since a cloned repo is usually a monorepo relative
+  to whatever single app is under test — this project's own repo included).
+  A relative `--requirements`/`--db-path` resolves against the *cloned
+  root* (not `--subdir`, since a requirements file often lives alongside,
+  not inside, the analyzed subdirectory) — only when `--repo` was actually
+  a GitHub URL; a plain local `--repo` keeps its exact prior behavior
+  (relative to the current working directory), so this is purely additive.
+- **Project identity keys off the original `--repo` spec, not the
+  resolved clone path** — this needed no code change at all, since Phase
+  8's existing `project.repo_path == repo` lookup already compared against
+  the raw CLI argument, never the internal resolved path. Matching on the
+  resolved path would have been actively wrong: Phase 17's isolated-per-run
+  clones mean no two runs against the same URL ever share a directory, so
+  memory/strategy continuity across runs against the same GitHub repo
+  depends on identity being the stable URL, not the ephemeral checkout.
+
+**Verified live, twice — once directly, once through the CLI.** Cloned
+this project's own public repo (`https://github.com/KNambiarDJsc/ket.git`)
+via `veriforge verify --repo <url> --subdir examples/example-app
+--requirements examples/requirements.md --url ...`: the console reported
+`Cloned https://github.com/KNambiarDJsc/ket.git @ <commit> -> ...`, parsed
+all 6 requirements from the *cloned* `requirements.md`, ranked and executed
+"Members cannot delete projects." against the live example app running
+from the *cloned* `app.py`, and confirmed the exact same `FAIL` +
+reproduced `SECURITY_FINDING` every local-path run of this same fixture
+has always produced — proof the clone is a fully equivalent, real analysis
+target, not a special-cased stub path. `tests/test_source_provider.py`
+covers the provider layer directly (URL matching, a real clone, two
+independent clones of the same URL never colliding, a bad-URL clone
+failing clearly); `tests/test_cli.py` is new test coverage for `cli/
+main.py`'s `verify` command overall (which had none before this phase) —
+confirming a local `--repo` behaves identically to every prior phase, and
+a GitHub `--repo` clones, resolves `--subdir`, and produces the same real
+finding end-to-end via `typer.testing.CliRunner`.
+
+**Deferred, explicitly.** GitHub App authentication (private repos,
+installation tokens, webhooks) and crash-resume hardening (killing a real
+process mid-run and proving `LoopState`/`BudgetTracker` actually resume
+correctly, not just that the primitives exist) are both real, substantial,
+separately-testable workstreams — this doc's own "2026-09-01 scope
+reconciliation" already named GitHub App auth as its own large effort
+belonging with Phase 18's production-auth work, and crash-resume needs a
+dedicated fault-injection harness of its own (arguably reusing Phase 14's
+`docker_env`/`fault_proxy` machinery), not something to bolt onto a
+same-process clone-and-analyze flow.
+
+## Phase 18 implementation notes
+
+Verified against this project's own `src/veriforge/` tree throughout, not
+the example apps — exactly the reasoning this phase's own roadmap entry
+gives for waiting this long: a 70-line stdlib server has no real cross-file
+call graph to speak of, so code intelligence would have nothing to prove
+itself against until now.
+
+- **`knowledge_graph/graph.py` — `KnowledgeGraph`/`build_knowledge_graph`**:
+  a real `Node`/`Edge` structure over `NodeKind` (REQUIREMENT, ENDPOINT,
+  CODE_FILE, FINDING, EVIDENCE, TEST) and typed edges
+  (`MATCHES_ENDPOINT`, `LOCATED_IN`, `VIOLATED_BY`, `SUPPORTED_BY`,
+  `VERIFIED_BY`), with `neighbors()`/`nodes_of_kind()` traversal. None of
+  these relationships are new data — `world_model.builder.
+  match_endpoint_for_requirement` already resolves Requirement→Endpoint,
+  and `Finding.requirement_id`/`Evidence.finding_id`/`Experiment.
+  requirement_id`+`Test.experiment_id` already carry the rest as scattered
+  foreign keys the codebase re-joins independently wherever it needs them.
+  This is what makes them one queryable structure instead: literally
+  "promote the flat WorldModel into a real linked graph," per the phase's
+  own wording, plus one hop further into Code via each endpoint's own
+  `source_file`.
+- **`code_intelligence/symbols.py` — `search_code`/`read_symbol`/
+  `find_callers`**: real AST-based tools, reusing `cartography.python_ast`'s
+  exact file-walking pattern (same `IGNORED_DIRS`, same parse-and-skip-on-
+  syntax-error shape) for a different fact — general function/class symbols
+  and call sites, not HTTP routes. `search_code` is deliberately not
+  AST-aware (a literal grep, since a comment or docstring is a fair match
+  too); `read_symbol`/`find_callers` build a fresh `SymbolIndex` per call,
+  matching `code.analyze_repository`'s own "re-analyze fresh every time"
+  precedent rather than caching state across harness calls. Registered as
+  three new READ-risk harness tools (`code.search`, `code.read_symbol`,
+  `code.find_callers`) for the same reason `code.analyze_repository` is
+  READ: these only ever read source files, never execute or modify them.
+- **`retrieval/hybrid.py` — `hybrid_search`**: ranks matches by three
+  independent, additive signals — lexical (a literal substring match,
+  always 1.0 once found), graph (is this file already connected to a
+  Requirement/Finding the Knowledge Graph knows about, +1.0), and semantic
+  (real embedding cosine similarity via `LLMProvider.embed()`, when a
+  provider actually implements it). Semantic scoring is capped at 15 real
+  embedding calls per search regardless of how many lexical candidates
+  exist — a real network round trip per call, and additive signal, never
+  the one thing a result depends on.
+- **`LLMProvider.embed()` — a new, non-abstract capability.** Added as a
+  concrete default (raises `LLMUnavailableError`) rather than an
+  `@abstractmethod`, specifically so every pre-existing subclass —
+  `NullLLMProvider` and every test file's own `NullLLM`/`FakeLLMProvider`
+  double, none of which predate this phase — keeps working unmodified.
+  Only `OllamaProvider.embed()` overrides it, calling Ollama's real
+  `/api/embeddings` endpoint against the separately-pulled
+  `nomic-embed-text` model (`VERIFORGE_EMBED_MODEL` env var to override).
+- **A real, pre-existing documentation gap found and fixed while verifying
+  this, not invented for this phase.** This doc's own "Local-first model
+  policy" claimed both the default chat model (`llama3.2:3b`) and
+  `nomic-embed-text` were "already pulled locally" on this dev machine.
+  Neither actually is — confirmed directly (`curl .../api/tags` lists only
+  `llama3:latest`; `OllamaProvider.embed()` raises a clean 404-backed
+  `LLMUnavailableError`). This is exactly why `test_ollama_provider.py::
+  test_live_ollama_smoke` has silently sat in every phase's own
+  `--deselect` list this entire project: `is_available()` only confirms
+  *some* model answers, not the *configured* one, so it reports available
+  and `generate()` then 404s. Fixed the doc to say so plainly instead of
+  leaving the deselect unexplained; a real `is_available()` fix (checking
+  the configured model is actually in the pulled list) is a genuine, small,
+  separate bug worth its own pass, not folded into this phase's scope.
+
+**Verified live, at every layer, against real multi-file code.**
+`build_symbol_index(src/veriforge)` finds 330+ real symbols across the
+whole tree; `find_callers("find_creation_endpoint")` correctly finds all 4
+real call sites spanning `http_executor.py` (three call sites) and
+`db_executor.py` (one) — a genuinely cross-file relationship no single-file
+example app could exercise. `search_code("no idempotency")` finds the real
+text this project's own Phase 15 code and docs contain.
+`build_knowledge_graph` against a real `WorldModel` correctly links a
+requirement to its matched endpoint, that endpoint to its real source file,
+and (given real Finding/Evidence/Test/Experiment rows) the requirement
+onward to both. `hybrid_search` against the real source tree: with no
+graph and no working embedding model, ranks purely on lexical match;
+adding a `KnowledgeGraph` node for a file that's genuinely connected boosts
+it above equally-lexical-matching files that aren't; with a real
+`OllamaProvider` (embedding model confirmed absent on this machine, per
+the note above) it degrades to lexical+graph exactly as designed, verified
+by actually calling it rather than assuming the fallback path works.
+
+**Deferred, explicitly.** The full Requirement→Feature→Workflow→UI→API→
+Code→DB→Test→Finding chain the spec names is only partially built: Feature,
+Workflow, and DB nodes don't exist yet, because nothing in this project's
+current World Model produces that data independently of what's already
+modeled (a Workflow already exists as its own `WorldModelState`/`Workflow`
+type from Phase 4, not yet folded into the graph) — adding graph node
+kinds with no real source data behind them would be exactly the kind of
+invented structure this project's engineering rules refuse to add. Not
+wired into `JobRunner` or `ContextCompiler` yet, the same "standalone,
+tested first" precedent as Phase 12's Skill retriever and Phase 14's
+environment modules — a Supervisor-level agent or a future Dashboard is
+the more natural first real caller, and neither exists yet either.
+
+## Phase 20 implementation notes
+
+Phase 19 was explicitly skipped on direct instruction ("phase 19 is
+unnecessary, let's complete phase 20 first and then see") — Phase 20
+was built directly on top of Phase 18's data model, exactly as the
+roadmap's own note said it needed to be. Its own "one genuinely separate
+product surface, its own stack decision" framing is taken literally: this
+is the first phase to add a real web-framework dependency
+(`fastapi`/`uvicorn` in `pyproject.toml`) rather than reusing the
+project's stdlib-only example-app pattern, which was always about keeping
+disposable *test fixtures* dependency-free, not a constraint on the real
+product.
+
+- **`orchestrator/run_verify.py` — a real refactor, not new behavior.**
+  Before this phase, `cli/main.py`'s `verify` command inlined all of
+  Phase 17's source-resolution/`--subdir` logic and Phase 8's Project-
+  reuse logic directly in a Typer command function — fine when the CLI was
+  the only caller, wrong once the Dashboard needed to launch a job too.
+  Extracted into a plain, Typer/console-free `run_verify(VerifyParams,
+  ...) -> VerifyOutcome` function; `cli/main.py` now calls it instead of
+  duplicating it. Confirmed zero behavior change: `tests/test_cli.py`'s
+  two pre-existing tests (local repo, GitHub clone) pass completely
+  unmodified against the refactored command.
+- **`dashboard/api.py` — a real FastAPI app over the exact Store every
+  other phase already writes to**, never a second source of truth:
+  - `GET /api/jobs` / `GET /api/jobs/{id}` — real job history and detail
+    (requirements, findings, test runs, artifacts) straight from
+    `TypedRepository.list_by_job`.
+  - `GET /api/jobs/{id}/graph` — the Phase 18 Knowledge Graph, built live
+    from that job's real `WorldModel` + `Finding`/`Evidence`/`Test`/
+    `Experiment` rows. This is the first real *consumer* of `knowledge_
+    graph.build_knowledge_graph` outside its own tests.
+  - `POST /api/verify` — launches a real job through `run_verify`,
+    synchronously, in the request handler (see "Deferred" below).
+  - `POST /api/ask` — the natural-language command bar
+    (`dashboard/nl_query.py`), deliberately **read-only**: it summarizes
+    real job/finding history into a compact prompt and asks the
+    configured LLM to answer strictly from that summary, degrading to the
+    raw summary text when no LLM is reachable — the same honest-
+    degradation shape as everything else optional in this project.
+    Translating free text into a *new* job (which repo to clone, which
+    URL to hit) was deliberately not built: an LLM deciding what to
+    execute against a live system from a prompt it might misread is
+    exactly the kind of unreviewed, LLM-initiated side effect the
+    harness/permission model exists to prevent everywhere else in this
+    codebase. Launching a job stays a separate, explicit, structured
+    action.
+  - `src/veriforge/dashboard/static/index.html` — a real, working,
+    dependency-free single-page frontend (vanilla JS, no build step)
+    calling all four endpoints: job table, a "run a new verification"
+    form, the ask bar, and a job-detail panel.
+  - New CLI command: `veriforge dashboard --workdir . --port 8420`.
+- **`ci/pr_reporter.py` — CI/GitHub PR integration**, scoped the same way
+  Phase 17 scoped GitHub access: `format_pr_comment` (pure, fully tested)
+  turns a real `RunSummary` + `Finding`s into the exact markdown a CI
+  pipeline would post; `post_pr_comment` makes a real, authenticated
+  `POST /repos/{owner}/{repo}/issues/{pr_number}/comments` call, gated
+  behind an explicit `VERIFORGE_GITHUB_TOKEN` and a new `--post-pr
+  owner/repo#123` CLI flag — never invoked automatically by anything in
+  this codebase. **Never actually posted to a real PR in this project's
+  own development**, the same honest boundary Phase 17 drew for GitHub
+  App auth: no real PR exists to test it against without posting a real,
+  visible comment, so `post_pr_comment` is verified only against a mocked
+  HTTP transport (a real request shape, a real error path), and the CLI
+  path degrades to a clear warning (not a crash) when the token is absent.
+- **Two real, small bugs found and fixed while wiring the natural-
+  language ask bar's tests**: a Windows sqlite-file-lock cleanup bug in a
+  hand-rolled temporary `Store` (the exact same class of bug Phase 16's
+  Harness Auditor had already found and fixed — simplified by reusing the
+  existing `store` pytest fixture instead of re-deriving the fix), and a
+  missing `__test__ = False` marker on the `TestRun` domain model
+  (`Test` already had one; `TestRun` didn't, so pytest tried to collect
+  it as a test class the first time a test file imported it by name).
+
+**Verified live, end to end, not just through pytest.** Started the real
+example app and a real `veriforge dashboard` process against a fresh
+workdir: `GET /api/jobs` correctly reported `[]` against no history;
+`POST /api/verify` launched a genuine job that found and confirmed the
+same "members can delete projects" bug every other phase's live
+verification has found; `GET /api/jobs` and `GET /api/jobs/{id}/graph`
+immediately reflected it — the graph response includes real `REQUIREMENT`,
+`ENDPOINT`, `CODE_FILE`, `FINDING`, `EVIDENCE`, and `TEST` nodes with real
+`MATCHES_ENDPOINT`/`LOCATED_IN`/`VIOLATED_BY`/`SUPPORTED_BY`/`VERIFIED_BY`
+edges connecting them; and `POST /api/ask` degraded gracefully to raw job
+history text with no LLM configured in that shell, exactly as designed.
+
+**Deferred, explicitly.** `POST /api/verify` runs synchronously in the
+request handler — a real, long-running verification (browser exploration,
+a GitHub clone) blocks that one request until it finishes. A background
+job queue is real, separate infrastructure this vertical slice doesn't
+need to prove itself, the same "don't build past what's demonstrated"
+discipline as every earlier phase's own deferrals — worth adding once the
+dashboard has more than one concurrent user. The Knowledge Graph view is
+raw nodes/edges JSON, not a rendered graph visualization (a force-directed
+layout is a real, separate frontend investment with no dependency on
+anything this phase built). And Phase 19's Advanced testing channels
+remain genuinely unstarted, not merely reordered — skipped on explicit
+direction, not folded into this phase.
+
 ## Local-first model policy
 
 - Default LLM provider is `OllamaProvider`, talking to `http://localhost:11434`.
-- Default model: `llama3.2:3b` (fast, already pulled). Configurable via
-  `VERIFORGE_LLM_MODEL` or `--model`.
+- Default model: `llama3.2:3b`. Configurable via `VERIFORGE_LLM_MODEL` or
+  `--model`. **Not actually pulled on this dev machine** (only `llama3:
+  latest` is) — this is exactly why `test_ollama_provider.py::test_live_
+  ollama_smoke` has stayed in this project's own known-deselect list across
+  every phase's full-suite run: `OllamaProvider.is_available()` only checks
+  that *some* model answers `/api/tags`, not that the *configured* one is
+  pulled, so it reports available and then `generate()` 404s. A real,
+  pre-existing gap worth naming honestly rather than leaving the deselect
+  unexplained.
 - `LLMProvider` is an abstract interface (`src/veriforge/llm/provider.py`) —
   a hosted-API provider can be added later without touching orchestration code.
-- Embeddings (for future semantic memory, phase 8) will use `nomic-embed-text`,
-  already pulled locally.
+- Embeddings use `nomic-embed-text` via `LLMProvider.embed()` (Phase 18) —
+  **also not actually pulled on this dev machine**, confirmed directly
+  (`OllamaProvider.embed()` raises a clean `LLMUnavailableError`, "404" from
+  Ollama's own `/api/embeddings`). Every embedding-consuming feature
+  (`retrieval/hybrid.py`'s semantic leg) is built to degrade to its other
+  real signals when this raises, precisely because this was verified to be
+  the actual state of this machine, not assumed.

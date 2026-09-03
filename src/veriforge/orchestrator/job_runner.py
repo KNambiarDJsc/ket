@@ -588,8 +588,8 @@ class JobRunner:
             tool_calls_used=self._budget.tool_calls_used,
             regression_test_path=execution.get("regression_test_path"),
             next_phase=(
-                "Phase 17 (Source connectors + durable multi-run architecture: GitHub App source "
-                "provider, immutable-commit resolution, isolated per-run workspace, crash-resume)"
+                "Phase 18 (Software Knowledge Graph + Code Intelligence retrieval: promote the flat "
+                "WorldModel into a linked graph with search_code/read_symbol/find_callers-style tools)"
             ),
         )
         self._write_artifact(job, "run-summary.json", summary.__dict__)

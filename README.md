@@ -4,7 +4,8 @@ Autonomous Software Verification & Testing OS. See `docs/PHASES.md` for the
 full architecture-to-phase mapping and the prior art (Ralph loop, Anthropic
 harness-engineering, EnvHarness, Claude Skills) this design draws from.
 
-This repo currently implements **Phase 0-16** (adds Project persistence/reuse
+This repo currently implements **Phase 0-18 and Phase 20** (Phase 19 was
+explicitly skipped — see `docs/PHASES.md`) (adds Project persistence/reuse
 across runs, episodic/semantic/procedural Memory, evaluation-gated
 Learning, two more executable invariant kinds — data-invariant status
 checks and the positive "only X may do this" authorization case — two
@@ -141,8 +142,55 @@ before/after benchmark run and blocks a harness change that regresses any
 one of the three metrics, even if the aggregate looks fine — the
 statistically-meaningful comparison Phase 8's Learning Engine was waiting on.
 
-Everything past that (the rest of Security/Concurrency, source connectors...)
-is future phase work — see `docs/PHASES.md` for the tracker.
+Phase 17 adds a real GitHub source connector: `--repo` now accepts a
+GitHub URL directly, not just a local path. `GitHubSourceProvider` clones
+it into an isolated per-run workspace (`git clone --depth 1`) and reads
+back the exact commit it landed on; a new `--subdir` flag points at the
+actual app to analyze inside the clone (most repos are monorepos relative
+to any one app under test). Verified against this project's own public
+repo: `veriforge verify --repo https://github.com/<owner>/<repo>.git
+--subdir examples/example-app --requirements examples/requirements.md
+--url ...` clones it live and reproduces the exact same confirmed
+`SECURITY_FINDING` every local-path run of that fixture already produces.
+GitHub App auth (private repos, webhooks) and crash-resume hardening are
+explicitly deferred — see `docs/PHASES.md`.
+
+Phase 18 adds a real Software Knowledge Graph and Code Intelligence layer.
+`knowledge_graph/graph.py` promotes the existing scattered foreign keys
+(Finding→Requirement, Evidence→Finding, Endpoint matches) into one
+queryable `Requirement → Endpoint → Code file` / `→ Finding → Evidence` /
+`→ Test` structure. `code_intelligence/symbols.py` adds real, AST-based
+`search_code`/`read_symbol`/`find_callers` tools — verified against this
+project's own multi-file source tree (a 70-line example app has no real
+call graph to prove these against), correctly finding all 4 real cross-file
+call sites for a known function. `retrieval/hybrid.py` combines lexical,
+graph, and real semantic-embedding signals (`LLMProvider.embed()`, new
+this phase) into one ranked relevance score, degrading gracefully to
+lexical+graph when no embedding model is pulled — which, verified directly
+against this dev machine's actual Ollama install, it currently isn't
+(neither is the default chat model, a real pre-existing gap this phase's
+docs correct).
+
+Phase 19 (Advanced testing channels — visual/accessibility/desktop/mobile)
+was explicitly skipped. Phase 20 adds the Dashboard: a real FastAPI app
+(`veriforge dashboard --workdir . --port 8420`) over the exact same Store
+every other phase already writes to — job history, findings, and a
+`GET /api/jobs/{id}/graph` endpoint that builds the real Phase 18
+Knowledge Graph live from that job's own data. `POST /api/verify` launches
+a real job from the dashboard's own form; `POST /api/ask` is a read-only
+natural-language bar that summarizes real job history for the configured
+LLM (or degrades to the raw summary with none configured) — it never
+launches a job itself, since letting an LLM decide what to execute from
+free text would be exactly the unreviewed side effect this project's
+harness model exists to prevent elsewhere. `ci/pr_reporter.py` adds
+`--post-pr owner/repo#123` to `verify`: a real GitHub PR-comment formatter
+and poster, gated behind an explicit token, never invoked automatically,
+and — like Phase 17's GitHub access — never yet run against a real PR in
+this project's own development.
+
+Everything past that (the rest of Security/Concurrency, and Phase 19
+whenever it's revisited) is future phase work — see `docs/PHASES.md` for
+the tracker.
 
 ## Setup
 
@@ -204,6 +252,42 @@ that confirmed bug into `--repo`'s own `veriforge_regressions/` directory
 (Phase 13). Since that writes into whatever `--repo` points at, try it
 against a copy of `examples/example-db-app` rather than the tracked one if
 you don't want the generated file showing up in `git status`.
+
+### Run it against a GitHub repo (Phase 17)
+
+```bash
+# Terminal 1: start the example app (same fixture, run from wherever you like)
+./.venv/Scripts/python examples/example-app/app.py
+
+# Terminal 2: point --repo at a GitHub URL instead of a local path -- it's
+# cloned into an isolated workspace under --workdir automatically.
+# --subdir picks the actual app inside the clone (most repos are monorepos).
+./.venv/Scripts/python -m veriforge.cli.main verify \
+  --repo https://github.com/<owner>/<repo>.git \
+  --subdir examples/example-app \
+  --requirements examples/requirements.md \
+  --url http://localhost:8000/ui \
+  --workdir .
+```
+
+A relative `--requirements`/`--db-path` resolves against the *cloned
+repo's root* (not `--subdir`), matching where such files usually live in a
+real repo. Only public HTTPS clone is supported today — GitHub App auth
+for private repos is future work.
+
+### Run the Dashboard (Phase 20)
+
+```bash
+./.venv/Scripts/python -m veriforge.cli.main dashboard --workdir . --port 8420
+```
+
+Open `http://localhost:8420` for a real, working UI over whatever
+`.veriforge/` state already exists under `--workdir` (run a few `verify`
+jobs first to have something to look at, or use the dashboard's own "Run a
+new verification" form). `GET /api/jobs/{id}/graph` exposes the Phase 18
+Knowledge Graph for that job as raw nodes/edges JSON. Add `--post-pr
+owner/repo#123` to `verify` (with `VERIFORGE_GITHUB_TOKEN` set) to post
+the result as a real PR comment.
 
 ## Tests
 
