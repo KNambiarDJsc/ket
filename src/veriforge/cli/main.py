@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -7,16 +8,27 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from veriforge.config import load_dotenv_if_present
 from veriforge.domain.models import Job, Project
 from veriforge.events.bus import EventBus
 from veriforge.llm.ollama_provider import DEFAULT_MODEL, OllamaProvider
+from veriforge.llm.openai_compatible_provider import OpenAICompatibleProvider
+from veriforge.llm.provider import LLMProvider
 from veriforge.orchestrator.job_runner import JobRunner
 from veriforge.storage.db import get_engine, get_session
 from veriforge.storage.repository import Store
 from veriforge.storage.schema import create_all
 
+load_dotenv_if_present()  # populates os.environ from ./.env before any option default reads it
+
 app = typer.Typer(help="VeriForge — Autonomous Software Verification & Testing OS")
 console = Console()
+
+
+def _build_llm_provider(provider: str, model: str | None) -> LLMProvider:
+    if provider == "openai":
+        return OpenAICompatibleProvider(model=model)
+    return OllamaProvider(model=model or DEFAULT_MODEL)
 
 
 @app.callback()
@@ -41,8 +53,19 @@ def verify(
         False, "--write-regressions",
         help="Write a permanent regression test into --repo for every BUG_VERIFIED finding (Phase 13). Off by default.",
     ),
-    model: str = typer.Option(
-        DEFAULT_MODEL, "--model", help="Local Ollama model to use (must be `ollama pull`ed already)"
+    llm_provider: str = typer.Option(
+        None, "--llm-provider",
+        help=(
+            "Which LLM backend to use: 'ollama' (default, local) or 'openai' "
+            "(any OpenAI-compatible /v1/chat/completions endpoint, e.g. an internal "
+            "LiteLLM proxy — configure VERIFORGE_OPENAI_BASE_URL/VERIFORGE_OPENAI_API_KEY, "
+            "in .env or the environment). Falls back to VERIFORGE_LLM_PROVIDER, then 'ollama'."
+        ),
+    ),
+    model: Optional[str] = typer.Option(
+        None, "--model",
+        help="Model name for the selected provider (Ollama: must be `ollama pull`ed already). "
+        "Falls back to VERIFORGE_LLM_MODEL, then the provider's own default.",
     ),
     workdir: str = typer.Option(".", "--workdir", help="Directory to store .veriforge/ state in"),
 ):
@@ -51,19 +74,28 @@ def verify(
         console.print("[red]At least one of --repo, --url, --requirements is required.[/red]")
         raise typer.Exit(code=1)
 
+    provider_name = llm_provider or os.environ.get("VERIFORGE_LLM_PROVIDER", "ollama")
+
     engine = get_engine(workdir)
     create_all(engine)
     session = get_session(workdir)
     store = Store(session)
     bus = EventBus(store)
-    llm = OllamaProvider(model=model)
+    llm = _build_llm_provider(provider_name, model)
 
     if not llm.is_available():
-        console.print(
-            f"[yellow]Warning:[/yellow] Ollama not reachable at its configured host, "
-            f"or model '{model}' not pulled. Analysis will proceed without LLM summarization. "
-            f"(Run `ollama pull {model}` and ensure `ollama serve` is running.)"
-        )
+        if provider_name == "openai":
+            console.print(
+                f"[yellow]Warning:[/yellow] OpenAI-compatible endpoint not reachable, or the "
+                f"model '{llm.model_name}' rejected the request. Check VERIFORGE_OPENAI_BASE_URL "
+                f"and VERIFORGE_OPENAI_API_KEY. Analysis will proceed without LLM summarization."
+            )
+        else:
+            console.print(
+                f"[yellow]Warning:[/yellow] Ollama not reachable at its configured host, "
+                f"or model '{llm.model_name}' not pulled. Analysis will proceed without LLM summarization. "
+                f"(Run `ollama pull {llm.model_name}` and ensure `ollama serve` is running.)"
+            )
 
     # Phase 8: reuse the same Project (and thus project_id) across runs when
     # --repo matches one seen before, so cross-run memory has an identity to
@@ -82,7 +114,7 @@ def verify(
         base_url=url,
         requirements_path=requirements,
         db_path=db_path,
-        model_name=model,
+        model_name=llm.model_name,
     )
 
     artifacts_dir = Path(workdir) / ".veriforge" / "artifacts"
