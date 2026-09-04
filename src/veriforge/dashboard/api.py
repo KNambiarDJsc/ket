@@ -140,6 +140,7 @@ def create_app(*, store: Store, bus: EventBus, llm: LLMProvider, workdir: str) -
             "verdict": outcome.summary.verdict,
             "finding_count": outcome.summary.finding_count,
             "top_hypothesis": outcome.summary.top_hypothesis,
+            "warnings": outcome.warnings,
         }
 
     # Routes above must be registered before this catch-all mount, or it

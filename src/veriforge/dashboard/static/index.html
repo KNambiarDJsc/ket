@@ -45,6 +45,9 @@
   .status-msg { font-size: 12px; margin-top: 6px; }
   .status-msg.error { color: var(--fail); }
   .status-msg.ok { color: var(--pass); }
+  .status-msg.warn { color: var(--uncertain); }
+  #verify-warning { display: none; margin-top: 8px; padding: 8px 10px; border-radius: 6px; font-size: 12px;
+    background: rgba(219,176,80,0.12); border: 1px solid rgba(219,176,80,0.4); color: var(--uncertain); }
 </style>
 </head>
 <body>
@@ -74,6 +77,7 @@
         <button type="submit">Run verify</button>
       </form>
       <div id="verify-status" class="status-msg"></div>
+      <div id="verify-warning"></div>
     </section>
   </div>
 
@@ -156,14 +160,21 @@ document.getElementById("verify-form").addEventListener("submit", async (e) => {
   const form = new FormData(e.target);
   const payload = Object.fromEntries([...form.entries()].filter(([, v]) => v));
   const statusEl = document.getElementById("verify-status");
-  statusEl.textContent = "Running…";
+  const warnEl = document.getElementById("verify-warning");
+  statusEl.textContent = "Running… (this blocks until the job finishes — no progress feedback yet)";
   statusEl.className = "status-msg";
+  warnEl.style.display = "none";
   try {
     const result = await fetchJSON("/api/verify", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
     });
+    const hasWarnings = result.warnings && result.warnings.length > 0;
     statusEl.textContent = `Job ${result.job_id} → verdict: ${result.verdict || "none"} (${result.finding_count} finding(s))`;
-    statusEl.className = "status-msg ok";
+    statusEl.className = hasWarnings ? "status-msg warn" : "status-msg ok";
+    if (hasWarnings) {
+      warnEl.innerHTML = result.warnings.map(w => `⚠ ${w}`).join("<br><br>");
+      warnEl.style.display = "block";
+    }
     loadJobs();
   } catch (err) {
     statusEl.textContent = "Error: " + err.message;

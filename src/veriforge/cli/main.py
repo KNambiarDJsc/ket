@@ -146,6 +146,8 @@ def verify(
     if outcome.cloned_note:
         console.print(f"[bold]{outcome.cloned_note}[/bold]")
     console.print(f"[bold]Job {outcome.job.id}[/bold] (project {outcome.project.id})")
+    for warning in outcome.warnings:
+        console.print(f"[bold yellow]Warning:[/bold yellow] {warning}")
     summary = outcome.summary
     findings_for_pr = store.findings.list_by_job(outcome.job.id)
     store.close()

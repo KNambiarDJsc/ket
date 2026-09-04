@@ -35,6 +35,15 @@ class VerifyOutcome:
     job: Job
     project: Project
     cloned_note: str | None  # a human-readable "Cloned X -> Y" note, or None if nothing was cloned
+    # Phase 20 UX fix: --repo alone (even a real GitHub URL) can only ever
+    # produce static analysis -- there is no requirement to check and no live
+    # target to check it against, so no experiment can ever run. Every prior
+    # phase already reports this honestly buried in hypotheses.json's
+    # execution_note, but a job still completes looking identical to a real
+    # PASS/FAIL run (verdict=null, 0 findings, state=COMPLETED) with nothing
+    # surfaced to say why -- see docs/PHASES.md's 2026-09-04 note. Callers
+    # (CLI, Dashboard) must show these prominently, not bury them.
+    warnings: list[str]
 
 
 def run_verify(params: VerifyParams, *, store: Store, bus: EventBus, llm: LLMProvider) -> VerifyOutcome:
@@ -97,7 +106,28 @@ def run_verify(params: VerifyParams, *, store: Store, bus: EventBus, llm: LLMPro
     runner = JobRunner(store, bus, llm, artifacts_dir, write_regressions=params.write_regressions)
     summary = runner.run(job)
 
-    return VerifyOutcome(summary=summary, job=job, project=project, cloned_note=cloned_note)
+    warnings: list[str] = []
+    if not requirements and not params.url:
+        warnings.append(
+            "No --requirements and no --url were given: only a static repo scan "
+            "(and an LLM summary, if a provider is configured) was performed. No "
+            "requirement was checked and no experiment could be executed -- this "
+            "run cannot confirm or rule out any bug."
+        )
+    elif not params.url:
+        warnings.append(
+            "No --url was given: requirements were parsed but there was no live "
+            "app to execute anything against -- every hypothesis stayed queued, "
+            "unexecuted."
+        )
+    elif not requirements:
+        warnings.append(
+            "No --requirements were given: the app was reachable/explored but "
+            "there is nothing to check it against, so no experiment could be "
+            "ranked or executed."
+        )
+
+    return VerifyOutcome(summary=summary, job=job, project=project, cloned_note=cloned_note, warnings=warnings)
 
 
 __all__ = ["VerifyParams", "VerifyOutcome", "run_verify", "GitHubCloneError"]
